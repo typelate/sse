@@ -1,122 +1,254 @@
+// Package sse implements the server side of the WHATWG Server-Sent Events
+// protocol.
+//
+// See https://html.spec.whatwg.org/multipage/server-sent-events.html for the
+// wire format and the rules clients follow when interpreting an event stream.
 package sse
 
 import (
 	"bytes"
-	"io"
+	"errors"
+	"fmt"
 	"net/http"
+	"net/textproto"
+	"strconv"
+	"strings"
 	"sync"
+	"time"
 )
 
 const (
-	LastEventIDRequestHeaderKey    = "Last-Event-ID"
-	ContentTypeResponseHeaderKey   = "content-type"
+	// LastEventIDRequestHeaderKey is the header a client sets when
+	// reconnecting, carrying the id of the last event it received so the
+	// server can resume the stream.
+	LastEventIDRequestHeaderKey = "Last-Event-Id"
+
+	ContentTypeResponseHeaderKey   = "Content-Type"
 	ContentTypeResponseHeaderValue = "text/event-stream; charset=utf-8"
-	ConnectionResponseHeaderKey    = "Connection"
-	ConnectionResponseHeaderValue  = "keep-alive"
+
+	ConnectionResponseHeaderKey   = "Connection"
+	ConnectionResponseHeaderValue = "keep-alive"
+
+	// CacheControlResponseHeaderKey is set to no-cache so intermediaries
+	// do not buffer the stream.
+	CacheControlResponseHeaderKey   = "Cache-Control"
+	CacheControlResponseHeaderValue = "no-cache"
 )
 
+// ErrInvalidField is returned when an id, event, or comment value contains a
+// CR or LF, which the SSE wire format reserves as line terminators.
+var ErrInvalidField = errors.New("sse: field contains forbidden CR or LF")
+
+type flushResponseWriter interface {
+	http.Flusher
+	http.ResponseWriter
+}
+
+// Response is an open Server-Sent Events stream. Message and Comment are safe
+// to call from multiple goroutines.
 type Response struct {
 	mut         sync.Mutex
-	flusher     http.Flusher
+	res         flushResponseWriter
 	lastEventID *string
 }
 
+// New writes the SSE response headers and the supplied status code, then
+// returns a *Response for sending events. The boolean is false if the
+// underlying ResponseWriter does not implement http.Flusher; in that case no
+// headers are written and the caller should respond with an error.
 func New(res http.ResponseWriter, req *http.Request, code int) (*Response, bool) {
-	var lastEventID *string
-	if _, isSet := req.Header[LastEventIDRequestHeaderKey]; isSet {
-		val := req.Header.Get(LastEventIDRequestHeaderKey)
-		lastEventID = &val
-	}
-	flusher, ok := res.(http.Flusher)
+	rw, ok := res.(flushResponseWriter)
 	if !ok {
 		return nil, false
 	}
-	headers := res.Header()
-	headers.Set(ContentTypeResponseHeaderKey, ContentTypeResponseHeaderValue)
-	headers.Set(ConnectionResponseHeaderKey, ConnectionResponseHeaderValue)
-	res.WriteHeader(code)
-	return &Response{
-		flusher:     flusher,
-		lastEventID: lastEventID,
-	}, true
-}
-
-func (res *Response) LastEventID() (string, bool) {
-	if res.lastEventID != nil {
-		return *res.lastEventID, true
+	var lastEventID *string
+	canonical := textproto.CanonicalMIMEHeaderKey(LastEventIDRequestHeaderKey)
+	if values, isSet := req.Header[canonical]; isSet && len(values) > 0 && values[0] != "" {
+		v := values[0]
+		lastEventID = &v
 	}
-	return "", false
+	h := res.Header()
+	h.Set(ContentTypeResponseHeaderKey, ContentTypeResponseHeaderValue)
+	h.Set(ConnectionResponseHeaderKey, ConnectionResponseHeaderValue)
+	h.Set(CacheControlResponseHeaderKey, CacheControlResponseHeaderValue)
+	res.WriteHeader(code)
+	return &Response{res: rw, lastEventID: lastEventID}, true
 }
 
+// LastEventID returns the value of the Last-Event-ID request header. The
+// boolean is false if the header was absent or empty.
+func (res *Response) LastEventID() (string, bool) {
+	if res.lastEventID == nil {
+		return "", false
+	}
+	return *res.lastEventID, true
+}
+
+// Message is an SSE event, configured via the With* options.
 type Message struct {
 	id    *string
 	event *string
+	retry *time.Duration
 	data  []byte
 	buf   *bytes.Buffer
 }
 
+// MessageOption configures a Message.
 type MessageOption func(*Message)
 
-func WithBytesBuffer(buf *bytes.Buffer) MessageOption { return func(m *Message) { m.buf = buf } }
-func WithEvent(event string) MessageOption            { return func(m *Message) { m.event = &event } }
-func WithID(id string) MessageOption                  { return func(m *Message) { m.id = &id } }
-
-func (res *Response) Message(data []byte, opts ...MessageOption) error {
-	res.mut.Lock()
-	defer func() {
-		res.flusher.Flush()
-		res.mut.Unlock()
-	}()
-	msg := Message{data: data}
-	for _, opt := range opts {
-		opt(&msg)
-	}
-	var buf = msg.buf
-	if buf == nil {
-		buf = bytes.NewBuffer(nil)
-	}
-	_, err := writeTo(&msg, buf)
-	if err != nil {
-		return err
-	}
-	return nil
+// WithBytesBuffer reuses a caller-provided buffer for assembling the wire
+// representation, useful for sync.Pool style allocation avoidance. The buffer
+// is reset before use.
+func WithBytesBuffer(buf *bytes.Buffer) MessageOption {
+	return func(m *Message) { m.buf = buf }
 }
 
-func writeTo(msg *Message, w *bytes.Buffer) (int64, error) {
-	var total int64
-	if msg.id != nil {
-		n, err := io.WriteString(w, "id: "+*msg.id+"\n")
-		total += int64(n)
-		if err != nil {
-			return total, err
-		}
+// WithEvent sets the event type. The value must not contain CR or LF.
+func WithEvent(event string) MessageOption {
+	return func(m *Message) { m.event = &event }
+}
+
+// WithID sets the id field, which the client echoes back via Last-Event-ID
+// after a disconnect. Pass an empty string to reset the client's stored id.
+// The value must not contain CR or LF.
+func WithID(id string) MessageOption {
+	return func(m *Message) { m.id = &id }
+}
+
+// WithIntID is a convenience for WithID(strconv.Itoa(id)).
+func WithIntID(id int) MessageOption {
+	return func(m *Message) {
+		s := strconv.Itoa(id)
+		m.id = &s
 	}
-	if msg.event != nil {
-		n, err := io.WriteString(w, "event: "+*msg.event+"\n")
-		total += int64(n)
-		if err != nil {
-			return total, err
-		}
+}
+
+// WithRetry sets the reconnection time the client should wait after the
+// connection drops. Sub-millisecond precision is dropped; the wire field is
+// an integer count of milliseconds.
+func WithRetry(d time.Duration) MessageOption {
+	return func(m *Message) { m.retry = &d }
+}
+
+// builder holds a Message and its assembly buffer in one heap object so
+// Response.Message can reuse both via sync.Pool and avoid per-call allocations.
+// The Message field would otherwise escape (its address is taken when applying
+// options), so co-locating it with the buffer hides that escape behind the
+// pool.
+type builder struct {
+	msg Message
+	buf bytes.Buffer
+}
+
+var builderPool = sync.Pool{
+	New: func() any { return &builder{} },
+}
+
+// Message sends an event to the client and flushes the connection. Multi-line
+// data is split into one "data:" line per line; \r\n and \r line terminators
+// inside data are normalized to \n.
+func (res *Response) Message(data []byte, opts ...MessageOption) error {
+	b := builderPool.Get().(*builder)
+	b.msg = Message{data: data}
+	for _, opt := range opts {
+		opt(&b.msg)
+	}
+	if b.msg.id != nil && strings.ContainsAny(*b.msg.id, "\r\n") {
+		err := fmt.Errorf("%w: id %q", ErrInvalidField, *b.msg.id)
+		builderPool.Put(b)
+		return err
+	}
+	if b.msg.event != nil && strings.ContainsAny(*b.msg.event, "\r\n") {
+		err := fmt.Errorf("%w: event %q", ErrInvalidField, *b.msg.event)
+		builderPool.Put(b)
+		return err
 	}
 
-	for line := range bytes.SplitSeq(bytes.TrimSuffix(msg.data, []byte{'\n'}), []byte{'\n'}) {
-		n1, err := io.WriteString(w, "data: ")
-		total += int64(n1)
-		if err != nil {
-			return total, err
-		}
-		n2, err := w.Write(line)
-		total += int64(n2)
-		if err != nil {
-			return total, err
-		}
-		n3, err := io.WriteString(w, "\n")
-		total += int64(n3)
-		if err != nil {
-			return total, err
-		}
+	buf := b.msg.buf
+	if buf == nil {
+		buf = &b.buf
 	}
-	n, err := io.WriteString(w, "\n")
-	total += int64(n)
-	return total, err
+	buf.Reset()
+	encode(buf, &b.msg)
+
+	res.mut.Lock()
+	_, err := res.res.Write(buf.Bytes())
+	res.res.Flush()
+	res.mut.Unlock()
+
+	builderPool.Put(b)
+	return err
+}
+
+// Comment writes a colon-prefixed comment line. Clients ignore comments; they
+// are useful as keep-alive pings to prevent proxies from closing idle
+// connections. The text must not contain CR or LF.
+func (res *Response) Comment(text string) error {
+	if strings.ContainsAny(text, "\r\n") {
+		return fmt.Errorf("%w: comment %q", ErrInvalidField, text)
+	}
+	b := builderPool.Get().(*builder)
+	b.buf.Reset()
+	writeStringLine(&b.buf, "", text)
+	b.buf.WriteString("\n")
+
+	res.mut.Lock()
+	_, err := res.res.Write(b.buf.Bytes())
+	res.res.Flush()
+	res.mut.Unlock()
+
+	builderPool.Put(b)
+
+	return err
+}
+
+func writeStringLine(w *bytes.Buffer, prefix, line string) {
+	if len(prefix) > 0 {
+		w.WriteString(prefix)
+	}
+	w.WriteString(": ")
+	if len(line) > 0 {
+		w.WriteString(line)
+	}
+	w.WriteByte('\n')
+}
+
+func writeBytesLine(w *bytes.Buffer, prefix string, line []byte) {
+	if len(prefix) > 0 {
+		w.WriteString(prefix)
+	}
+	w.WriteString(": ")
+	if len(line) > 0 {
+		w.Write(line)
+	}
+	w.WriteByte('\n')
+}
+
+// encode serializes msg into w. It uses direct buffer writes to avoid the
+// allocations from "field: "+value+"\n" string concatenation.
+func encode(w *bytes.Buffer, msg *Message) {
+	if msg.id != nil {
+		writeStringLine(w, "id", *msg.id)
+	}
+	if msg.event != nil {
+		writeStringLine(w, "event", *msg.event)
+	}
+	if msg.retry != nil {
+		var scratch [20]byte // enough for any int64
+		writeBytesLine(w, "retry", strconv.AppendInt(scratch[:0], msg.retry.Milliseconds(), 10))
+	}
+
+	data := msg.data
+	if bytes.IndexByte(data, '\r') >= 0 {
+		// Normalize CRLF and bare CR to LF so no stray line terminators
+		// appear inside a data field on the wire.
+		data = bytes.ReplaceAll(data, []byte("\r\n"), []byte("\n"))
+		data = bytes.ReplaceAll(data, []byte{'\r'}, []byte{'\n'})
+	}
+	data = bytes.TrimSuffix(data, []byte{'\n'})
+
+	for line := range bytes.SplitSeq(data, []byte{'\n'}) {
+		writeBytesLine(w, "data", line)
+	}
+	w.WriteByte('\n')
 }
