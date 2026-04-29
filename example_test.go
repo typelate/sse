@@ -3,6 +3,7 @@ package sse_test
 import (
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 
@@ -23,9 +24,15 @@ func Example() {
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
-	res, _ := http.Get(srv.URL)
+	res, err := http.Get(srv.URL)
+	if err != nil {
+		log.Fatal(err)
+	}
 	defer res.Body.Close()
-	body, _ := io.ReadAll(res.Body)
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		log.Fatal(err)
+	}
 	fmt.Printf("%s", body)
 
 	// Output:
