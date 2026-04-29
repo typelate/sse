@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 
-	"sse"
+	"github.com/typelate/sse"
 )
 
 func Example() {

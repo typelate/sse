@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"sse"
+	"github.com/typelate/sse"
 )
 
 // discardResponseWriter is the smallest possible Flusher+ResponseWriter so

@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"sse"
+	"github.com/typelate/sse"
 )
 
 func TestNew_setsHeadersAndStatus(t *testing.T) {
