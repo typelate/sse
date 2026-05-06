@@ -38,6 +38,18 @@ func TestNew_setsHeadersAndStatus(t *testing.T) {
 	}
 }
 
+func TestNew_flushesHeaders(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+
+	if _, ok := sse.New(rec, req, http.StatusOK); !ok {
+		t.Fatal("New returned false")
+	}
+	if !rec.Flushed {
+		t.Error("New did not flush after WriteHeader; clients would not see onopen until first event")
+	}
+}
+
 func TestNew_returnsFalseWithoutFlusher(t *testing.T) {
 	var rec nonFlushingResponseWriter
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
