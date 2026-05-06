@@ -71,7 +71,8 @@ func New(res http.ResponseWriter, req *http.Request, code int) (*Response, bool)
 	h.Set(ContentTypeResponseHeaderKey, ContentTypeResponseHeaderValue)
 	h.Set(ConnectionResponseHeaderKey, ConnectionResponseHeaderValue)
 	h.Set(CacheControlResponseHeaderKey, CacheControlResponseHeaderValue)
-	res.WriteHeader(code)
+	rw.WriteHeader(code)
+	rw.Flush()
 	return &Response{res: rw, lastEventID: lastEventID}, true
 }
 
