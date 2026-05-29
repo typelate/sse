@@ -7,7 +7,6 @@ package sse
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/textproto"
@@ -21,18 +20,18 @@ import (
 // character the SSE wire format forbids: CR or LF (reserved as line
 // terminators) in any field, or a NUL in an id (which the client ignores,
 // silently dropping the id).
-var ErrInvalidField = errors.New("sse: field contains a forbidden character")
+const ErrInvalidField Error = "sse: field contains a forbidden character"
 
-type flushResponseWriter interface {
-	http.Flusher
-	http.ResponseWriter
-}
+type Error string
+
+func (se Error) Error() string { return string(se) }
 
 // Response is an open Server-Sent Events stream. Message and Comment are safe
 // to call from multiple goroutines.
 type Response struct {
 	mut         sync.Mutex
-	res         flushResponseWriter
+	res         http.ResponseWriter
+	flusher     http.Flusher
 	lastEventID *string
 }
 
@@ -41,7 +40,7 @@ type Response struct {
 // underlying ResponseWriter does not implement http.Flusher; in that case no
 // headers are written and the caller should respond with an error.
 func New(res http.ResponseWriter, req *http.Request, code int) (*Response, bool) {
-	rw, ok := res.(flushResponseWriter)
+	flusher, ok := res.(http.Flusher)
 	if !ok {
 		return nil, false
 	}
@@ -55,9 +54,9 @@ func New(res http.ResponseWriter, req *http.Request, code int) (*Response, bool)
 	h.Set("Content-Type", "text/event-stream; charset=utf-8")
 	h.Set("Connection", "keep-alive")
 	h.Set("Cache-Control", "no-cache")
-	rw.WriteHeader(code)
-	rw.Flush()
-	return &Response{res: rw, lastEventID: lastEventID}, true
+	res.WriteHeader(code)
+	flusher.Flush()
+	return &Response{res: res, flusher: flusher, lastEventID: lastEventID}, true
 }
 
 // LastEventID returns the value of the Last-Event-ID request header. The
@@ -117,63 +116,48 @@ func WithRetry(d time.Duration) MessageOption {
 	return func(m *Message) { m.retry = &d }
 }
 
-// builder holds a Message and its assembly buffer in one heap object so
-// Response.Message can reuse both via sync.Pool and avoid per-call allocations.
-// The Message field would otherwise escape (its address is taken when applying
-// options), so co-locating it with the buffer hides that escape behind the
-// pool.
-type builder struct {
-	msg Message
-	buf bytes.Buffer
-}
-
 var builderPool = sync.Pool{
-	New: func() any { return &builder{} },
+	New: func() any { return bytes.NewBuffer(nil) },
 }
 
 // Message sends an event to the client and flushes the connection. Multi-line
 // data is split into one "data:" line per line; \r\n and \r line terminators
 // inside data are normalized to \n.
 func (res *Response) Message(data []byte, opts ...MessageOption) error {
-	b := builderPool.Get().(*builder)
-	b.msg = Message{data: data}
+	m := Message{data: data}
 	for _, opt := range opts {
-		opt(&b.msg)
+		opt(&m)
 	}
-	if b.msg.id != nil && strings.ContainsAny(*b.msg.id, "\r\n\x00") {
-		err := fmt.Errorf("%w: id %q", ErrInvalidField, *b.msg.id)
-		builderPool.Put(b)
+	if err := checkID(m.id); err != nil {
 		return err
 	}
-	if b.msg.event != nil && strings.ContainsAny(*b.msg.event, "\r\n") {
-		err := fmt.Errorf("%w: event %q", ErrInvalidField, *b.msg.event)
-		builderPool.Put(b)
+	if err := checkEvent(m.event); err != nil {
 		return err
 	}
 
-	buf := b.msg.buf
-	if buf == nil {
-		buf = &b.buf
+	if m.buf == nil {
+		b := builderPool.Get().(*bytes.Buffer)
+		defer builderPool.Put(b)
+		m.buf = b
 	}
-	buf.Reset()
+	defer m.buf.Reset()
 
-	if b.msg.id != nil {
-		writeID(buf, *b.msg.id)
+	if m.id != nil {
+		writeID(m.buf, *m.id)
 	}
-	if b.msg.event != nil && len(*b.msg.event) > 0 {
-		writeEvent(buf, *b.msg.event)
+	if m.event != nil && len(*m.event) > 0 {
+		writeEvent(m.buf, *m.event)
 	}
-	if b.msg.retry != nil {
-		writeRetry(buf, *b.msg.retry)
+	if m.retry != nil {
+		writeRetry(m.buf, *m.retry)
 	}
-	writeData(buf, data)
+	writeData(m.buf, data)
 
 	res.mut.Lock()
-	_, err := res.res.Write(buf.Bytes())
-	res.res.Flush()
+	_, err := res.res.Write(m.buf.Bytes())
+	res.flusher.Flush()
 	res.mut.Unlock()
 
-	builderPool.Put(b)
 	return err
 }
 
@@ -181,31 +165,58 @@ func (res *Response) Message(data []byte, opts ...MessageOption) error {
 // are useful as keep-alive pings to prevent proxies from closing idle
 // connections. The text must not contain CR or LF.
 func (res *Response) Comment(text string) error {
+	if err := checkComment(text); err != nil {
+		return err
+	}
+
+	b := builderPool.Get().(*bytes.Buffer)
+	defer builderPool.Put(b)
+	b.Reset()
+	defer b.Reset()
+
+	writeComment(b, text)
+
+	res.mut.Lock()
+	_, err := res.res.Write(b.Bytes())
+	res.flusher.Flush()
+	res.mut.Unlock()
+
+	return err
+}
+
+func checkComment(text string) error {
 	if strings.ContainsAny(text, "\r\n") {
 		return fmt.Errorf("%w: comment %q", ErrInvalidField, text)
 	}
-	b := builderPool.Get().(*builder)
-	b.buf.Reset()
-	b.buf.WriteString(": ")
+	return nil
+}
+
+func writeComment(buf *bytes.Buffer, text string) {
+	buf.WriteString(": ")
 	if len(text) > 0 {
-		b.buf.WriteString(text)
+		buf.WriteString(text)
 	}
-	b.buf.WriteString("\n\n")
+	buf.WriteString("\n\n")
+}
 
-	res.mut.Lock()
-	_, err := res.res.Write(b.buf.Bytes())
-	res.res.Flush()
-	res.mut.Unlock()
-
-	builderPool.Put(b)
-
-	return err
+func checkID(id *string) error {
+	if id != nil && strings.ContainsAny(*id, "\r\n\x00") {
+		return fmt.Errorf("%w: id %q", ErrInvalidField, *id)
+	}
+	return nil
 }
 
 func writeID(buf *bytes.Buffer, id string) {
 	buf.WriteString("id: ")
 	buf.WriteString(id)
 	buf.WriteByte('\n')
+}
+
+func checkEvent(event *string) error {
+	if event != nil && strings.ContainsAny(*event, "\r\n") {
+		return fmt.Errorf("%w: event %q", ErrInvalidField, *event)
+	}
+	return nil
 }
 
 func writeEvent(buf *bytes.Buffer, event string) {
