@@ -1,8 +1,10 @@
 package sse_test
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -185,6 +187,7 @@ func TestSource(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			// rec.Result() has no Request field, so Source does not retry.
 			rec, r := newSSEResponse(t)
 			tc.write(t, r)
 
@@ -247,7 +250,7 @@ func TestSource_endToEnd(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	res, err := http.Get(srv.URL)
+	res, err := http.Get(srv.URL) //nolint:noctx
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,6 +263,9 @@ func TestSource_endToEnd(t *testing.T) {
 	var msgs []*sse.Message
 	for m := range seq {
 		msgs = append(msgs, m)
+		if len(msgs) == 2 {
+			break // stop after expected count so we don't trigger reconnect
+		}
 	}
 
 	if len(msgs) != 2 {
@@ -276,5 +282,71 @@ func TestSource_endToEnd(t *testing.T) {
 	}
 	if got := msgs[1].Data(); got != "multi\nline" {
 		t.Errorf("msgs[1].Data() = %q, want %q", got, "multi\nline")
+	}
+}
+
+// TestSource_reconnect verifies that Source reconnects after EOF, sends the
+// Last-Event-ID header from the last received event, and yields messages from
+// the new connection. The server uses retry:1 to keep the test fast.
+func TestSource_reconnect(t *testing.T) {
+	var connections atomic.Int32
+	var lastEventIDOnReconnect string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		switch connections.Add(1) {
+		case 1:
+			r, _ := sse.New(w, req, http.StatusOK)
+			// retry:1ms so the test doesn't wait the 3s default
+			if err := r.Message([]byte("first"), sse.WithID("42"), sse.WithRetry(time.Millisecond)); err != nil {
+				t.Errorf("Message: %v", err)
+			}
+		case 2:
+			lastEventIDOnReconnect = req.Header.Get("Last-Event-Id")
+			r, _ := sse.New(w, req, http.StatusOK)
+			if err := r.Message([]byte("second")); err != nil {
+				t.Errorf("Message: %v", err)
+			}
+		default:
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+
+	seq, err := sse.Source(res, sse.WithClient(srv.Client()))
+	if err != nil {
+		t.Fatalf("Source: %v", err)
+	}
+	var msgs []*sse.Message
+	for m := range seq {
+		msgs = append(msgs, m)
+		if len(msgs) == 2 {
+			break
+		}
+	}
+
+	if len(msgs) != 2 {
+		t.Fatalf("got %d messages, want 2", len(msgs))
+	}
+	if got := msgs[0].Data(); got != "first" {
+		t.Errorf("msgs[0].Data() = %q, want %q", got, "first")
+	}
+	if got := msgs[1].Data(); got != "second" {
+		t.Errorf("msgs[1].Data() = %q, want %q", got, "second")
+	}
+	if lastEventIDOnReconnect != "42" {
+		t.Errorf("Last-Event-Id on reconnect = %q, want %q", lastEventIDOnReconnect, "42")
 	}
 }
