@@ -156,51 +156,17 @@ func (res *Response) Message(data []byte, opts ...MessageOption) error {
 		buf = &b.buf
 	}
 	buf.Reset()
+
 	if b.msg.id != nil {
-		buf.WriteString("id: ")
-		if len(*b.msg.id) > 0 {
-			buf.WriteString(*b.msg.id)
-		}
-		buf.WriteByte('\n')
+		writeID(buf, *b.msg.id)
 	}
-	if b.msg.event != nil {
-		buf.WriteString("event: ")
-		if len(*b.msg.event) > 0 {
-			buf.WriteString(*b.msg.event)
-		}
-		buf.WriteByte('\n')
+	if b.msg.event != nil && len(*b.msg.event) > 0 {
+		writeEvent(buf, *b.msg.event)
 	}
 	if b.msg.retry != nil {
-		ms := b.msg.retry.Milliseconds()
-		if ms < 0 {
-			// A negative reconnection time can't be represented on the wire
-			// (the client only parses an all-ASCII-digits value), so floor it.
-			ms = 0
-		}
-		buf.WriteString("retry: ")
-		var scratch [20]byte // enough for any int64
-		if line := strconv.AppendInt(scratch[:0], ms, 10); len(line) > 0 {
-			buf.Write(line)
-		}
-		buf.WriteByte('\n')
+		writeRetry(buf, *b.msg.retry)
 	}
-
-	if bytes.IndexByte(b.msg.data, '\r') >= 0 {
-		// Normalize CRLF and bare CR to LF so no stray line terminators
-		// appear inside a data field on the wire.
-		b.msg.data = bytes.ReplaceAll(b.msg.data, []byte("\r\n"), []byte("\n"))
-		b.msg.data = bytes.ReplaceAll(b.msg.data, []byte{'\r'}, []byte{'\n'})
-	}
-	b.msg.data = bytes.TrimSuffix(b.msg.data, []byte{'\n'})
-
-	for line := range bytes.SplitSeq(b.msg.data, []byte{'\n'}) {
-		buf.WriteString("data: ")
-		if len(line) > 0 {
-			buf.Write(line)
-		}
-		buf.WriteByte('\n')
-	}
-	buf.WriteByte('\n')
+	writeData(buf, data)
 
 	res.mut.Lock()
 	_, err := res.res.Write(buf.Bytes())
@@ -234,4 +200,50 @@ func (res *Response) Comment(text string) error {
 	builderPool.Put(b)
 
 	return err
+}
+
+func writeID(buf *bytes.Buffer, id string) {
+	buf.WriteString("id: ")
+	buf.WriteString(id)
+	buf.WriteByte('\n')
+}
+
+func writeEvent(buf *bytes.Buffer, event string) {
+	buf.WriteString("event: ")
+	buf.WriteString(event)
+	buf.WriteByte('\n')
+}
+
+func writeRetry(buf *bytes.Buffer, retry time.Duration) {
+	ms := retry.Milliseconds()
+	if ms < 0 {
+		// A negative reconnection time can't be represented on the wire
+		// (the client only parses an all-ASCII-digits value), so floor it.
+		ms = 0
+	}
+	buf.WriteString("retry: ")
+	var scratch [20]byte // enough for any int64
+	if line := strconv.AppendInt(scratch[:0], ms, 10); len(line) > 0 {
+		buf.Write(line)
+	}
+	buf.WriteByte('\n')
+}
+
+func writeData(buf *bytes.Buffer, data []byte) {
+	if bytes.IndexByte(data, '\r') >= 0 {
+		// Normalize CRLF and bare CR to LF so no stray line terminators
+		// appear inside a data field on the wire.
+		data = bytes.ReplaceAll(data, []byte("\r\n"), []byte("\n"))
+		data = bytes.ReplaceAll(data, []byte{'\r'}, []byte{'\n'})
+	}
+	data = bytes.TrimSuffix(data, []byte{'\n'})
+
+	for line := range bytes.SplitSeq(data, []byte{'\n'}) {
+		buf.WriteString("data: ")
+		if len(line) > 0 {
+			buf.Write(line)
+		}
+		buf.WriteByte('\n')
+	}
+	buf.WriteByte('\n')
 }
