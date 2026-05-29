@@ -95,6 +95,31 @@ type Message struct {
 	buf   *bytes.Buffer
 }
 
+func (m *Message) ID() (string, bool) {
+	if m.id == nil {
+		return "", false
+	}
+	return *m.id, true
+}
+
+func (m *Message) Event() (string, bool) {
+	if m.event == nil {
+		return "", false
+	}
+	return *m.event, true
+}
+
+func (m *Message) Retry() (time.Duration, bool) {
+	if m.event == nil {
+		return 0, false
+	}
+	return *m.retry, true
+}
+
+func (m *Message) Data() string {
+	return string(m.data)
+}
+
 // MessageOption configures a Message.
 type MessageOption func(*Message)
 
