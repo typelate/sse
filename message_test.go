@@ -119,6 +119,7 @@ func TestMessage(t *testing.T) {
 		{name: "event", data: []byte("hello"), opts: []sse.MessageOption{sse.WithEvent("greet")}, want: "event: greet\ndata: hello\n\n"},
 		{name: "retry", data: []byte("hello"), opts: []sse.MessageOption{sse.WithRetry(2 * time.Second)}, want: "retry: 2000\ndata: hello\n\n"},
 		{name: "all fields", data: []byte("hello"), opts: []sse.MessageOption{sse.WithID("9"), sse.WithEvent("ping"), sse.WithRetry(500 * time.Millisecond)}, want: "id: 9\nevent: ping\nretry: 500\ndata: hello\n\n"},
+		{name: "negative retry clamped to zero", data: []byte("hello"), opts: []sse.MessageOption{sse.WithRetry(-2 * time.Second)}, want: "retry: 0\ndata: hello\n\n"},
 		{name: "multi-line LF", data: []byte("a\nb\nc"), want: "data: a\ndata: b\ndata: c\n\n"},
 		{name: "multi-line CRLF normalized", data: []byte("a\r\nb\r\nc"), want: "data: a\ndata: b\ndata: c\n\n"},
 		{name: "multi-line bare CR normalized", data: []byte("a\rb\rc"), want: "data: a\ndata: b\ndata: c\n\n"},
@@ -154,6 +155,7 @@ func TestMessage_invalidFields(t *testing.T) {
 	}{
 		{"id with LF", []sse.MessageOption{sse.WithID("a\nb")}},
 		{"id with CR", []sse.MessageOption{sse.WithID("a\rb")}},
+		{"id with NUL", []sse.MessageOption{sse.WithID("a\x00b")}},
 		{"event with LF", []sse.MessageOption{sse.WithEvent("a\nb")}},
 		{"event with CR", []sse.MessageOption{sse.WithEvent("a\rb")}},
 	} {

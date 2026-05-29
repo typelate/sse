@@ -36,8 +36,10 @@ const (
 )
 
 // ErrInvalidField is returned when an id, event, or comment value contains a
-// CR or LF, which the SSE wire format reserves as line terminators.
-var ErrInvalidField = errors.New("sse: field contains forbidden CR or LF")
+// character the SSE wire format forbids: CR or LF (reserved as line
+// terminators) in any field, or a NUL in an id (which the client ignores,
+// silently dropping the id).
+var ErrInvalidField = errors.New("sse: field contains a forbidden character")
 
 type flushResponseWriter interface {
 	http.Flusher
@@ -111,7 +113,8 @@ func WithEvent(event string) MessageOption {
 
 // WithID sets the id field, which the client echoes back via Last-Event-ID
 // after a disconnect. Pass an empty string to reset the client's stored id.
-// The value must not contain CR or LF.
+// The value must not contain CR, LF, or NUL: the client ignores an id
+// containing NUL, so allowing it would silently drop the id.
 func WithID(id string) MessageOption {
 	return func(m *Message) { m.id = &id }
 }
@@ -126,7 +129,8 @@ func WithIntID(id int) MessageOption {
 
 // WithRetry sets the reconnection time the client should wait after the
 // connection drops. Sub-millisecond precision is dropped; the wire field is
-// an integer count of milliseconds.
+// an integer count of milliseconds. A negative duration is floored to 0,
+// since the wire format cannot represent a negative reconnection time.
 func WithRetry(d time.Duration) MessageOption {
 	return func(m *Message) { m.retry = &d }
 }
@@ -154,7 +158,7 @@ func (res *Response) Message(data []byte, opts ...MessageOption) error {
 	for _, opt := range opts {
 		opt(&b.msg)
 	}
-	if b.msg.id != nil && strings.ContainsAny(*b.msg.id, "\r\n") {
+	if b.msg.id != nil && strings.ContainsAny(*b.msg.id, "\r\n\x00") {
 		err := fmt.Errorf("%w: id %q", ErrInvalidField, *b.msg.id)
 		builderPool.Put(b)
 		return err
@@ -235,8 +239,14 @@ func encode(w *bytes.Buffer, msg *Message) {
 		writeStringLine(w, "event", *msg.event)
 	}
 	if msg.retry != nil {
+		ms := msg.retry.Milliseconds()
+		if ms < 0 {
+			// A negative reconnection time can't be represented on the wire
+			// (the client only parses an all-ASCII-digits value), so floor it.
+			ms = 0
+		}
 		var scratch [20]byte // enough for any int64
-		writeBytesLine(w, "retry", strconv.AppendInt(scratch[:0], msg.retry.Milliseconds(), 10))
+		writeBytesLine(w, "retry", strconv.AppendInt(scratch[:0], ms, 10))
 	}
 
 	data := msg.data
