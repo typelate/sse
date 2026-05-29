@@ -16,15 +16,33 @@ import (
 	"time"
 )
 
+const (
+	// LastEventIDRequestHeaderKey is the header a client sets when
+	// reconnecting, carrying the id of the last event it received so the
+	// server can resume the stream.
+	LastEventIDRequestHeaderKey = "Last-Event-Id"
+
+	ContentTypeResponseHeaderKey   = "Content-Type"
+	ContentTypeResponseHeaderValue = "text/event-stream; charset=utf-8"
+
+	ConnectionResponseHeaderKey   = "Connection"
+	ConnectionResponseHeaderValue = "keep-alive"
+
+	// CacheControlResponseHeaderKey is set to no-cache so intermediaries
+	// do not buffer the stream.
+	CacheControlResponseHeaderKey   = "Cache-Control"
+	CacheControlResponseHeaderValue = "no-cache"
+)
+
 // ErrInvalidField is returned when an id, event, or comment value contains a
 // character the SSE wire format forbids: CR or LF (reserved as line
 // terminators) in any field, or a NUL in an id (which the client ignores,
 // silently dropping the id).
-const ErrInvalidField Error = "sse: field contains a forbidden character"
+const ErrInvalidField errorString = "sse: field contains a forbidden character"
 
-type Error string
+type errorString string
 
-func (se Error) Error() string { return string(se) }
+func (se errorString) Error() string { return string(se) }
 
 // Response is an open Server-Sent Events stream. Message and Comment are safe
 // to call from multiple goroutines.
@@ -45,15 +63,15 @@ func New(res http.ResponseWriter, req *http.Request, code int) (*Response, bool)
 		return nil, false
 	}
 	var lastEventID *string
-	canonical := textproto.CanonicalMIMEHeaderKey("Last-Event-Id")
+	canonical := textproto.CanonicalMIMEHeaderKey(LastEventIDRequestHeaderKey)
 	if values, isSet := req.Header[canonical]; isSet && len(values) > 0 && values[0] != "" {
 		v := values[0]
 		lastEventID = &v
 	}
 	h := res.Header()
-	h.Set("Content-Type", "text/event-stream; charset=utf-8")
-	h.Set("Connection", "keep-alive")
-	h.Set("Cache-Control", "no-cache")
+	h.Set(ContentTypeResponseHeaderKey, ContentTypeResponseHeaderValue)
+	h.Set(ConnectionResponseHeaderKey, ConnectionResponseHeaderValue)
+	h.Set(CacheControlResponseHeaderKey, CacheControlResponseHeaderValue)
 	res.WriteHeader(code)
 	flusher.Flush()
 	return &Response{res: res, flusher: flusher, lastEventID: lastEventID}, true
