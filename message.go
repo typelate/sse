@@ -8,6 +8,7 @@ package sse
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"net/http"
 	"net/textproto"
 	"strconv"
@@ -88,11 +89,103 @@ func (res *Response) LastEventID() (string, bool) {
 
 // Message is an SSE event, configured via the With* options.
 type Message struct {
-	id    *string
-	event *string
-	retry *time.Duration
-	data  []byte
-	buf   *bytes.Buffer
+	id                *string
+	event             *string
+	retryMilliseconds *int64
+	buf, data         *bytes.Buffer
+}
+
+func (m *Message) WriteTo(w io.Writer) (int64, error) {
+	if m.id != nil && strings.ContainsAny(*m.id, "\r\n\x00") {
+		return 0, fmt.Errorf("sse: id contains a forbidden character")
+	}
+	if m.event != nil && strings.ContainsAny(*m.event, "\r\n") {
+		return 0, fmt.Errorf("sse: event contains a forbidden character")
+	}
+	var bytesWritten int
+	if m.id != nil {
+		if n, err := io.WriteString(w, "id: "); err != nil {
+			return int64(bytesWritten + n), err
+		} else {
+			bytesWritten += n
+		}
+		if n, err := io.WriteString(w, *m.id); err != nil {
+			return int64(bytesWritten + n), err
+		} else {
+			bytesWritten += n
+		}
+		if n, err := w.Write([]byte{'\n'}); err != nil {
+			return int64(bytesWritten + n), err
+		} else {
+			bytesWritten += n
+		}
+	}
+	if m.event != nil {
+		if n, err := io.WriteString(w, "event: "); err != nil {
+			return int64(bytesWritten + n), err
+		} else {
+			bytesWritten += n
+		}
+		if n, err := io.WriteString(w, *m.event); err != nil {
+			return int64(bytesWritten + n), err
+		} else {
+			bytesWritten += n
+		}
+		if n, err := w.Write([]byte{'\n'}); err != nil {
+			return int64(bytesWritten + n), err
+		} else {
+			bytesWritten += n
+		}
+	}
+	if m.retryMilliseconds != nil {
+		if n, err := io.WriteString(w, "retry: "); err != nil {
+			return int64(bytesWritten + n), err
+		} else {
+			bytesWritten += n
+		}
+		var retryBuf [20]byte
+		if n, err := w.Write(strconv.AppendInt(retryBuf[:0], int64(*m.retryMilliseconds), 10)); err != nil {
+			return int64(bytesWritten + n), err
+		} else {
+			bytesWritten += n
+		}
+		if n, err := w.Write([]byte{'\n'}); err != nil {
+			return int64(bytesWritten + n), err
+		} else {
+			bytesWritten += n
+		}
+	}
+	data := m.data.Bytes()
+	if bytes.IndexByte(data, '\r') >= 0 {
+		data = bytes.ReplaceAll(data, []byte("\r\n"), []byte("\n"))
+		data = bytes.ReplaceAll(data, []byte("\r"), []byte("\n"))
+	}
+	data = bytes.TrimSuffix(data, []byte{'\n'})
+	for line := range bytes.SplitSeq(data, []byte{'\n'}) {
+		if n, err := io.WriteString(w, "data: "); err != nil {
+			return int64(bytesWritten + n), err
+		} else {
+			bytesWritten += n
+		}
+		if len(line) > 0 {
+			if n, err := w.Write(line); err != nil {
+				return int64(bytesWritten + n), err
+			} else {
+				bytesWritten += n
+			}
+		}
+		if n, err := w.Write([]byte{'\n'}); err != nil {
+			return int64(bytesWritten + n), err
+		} else {
+			bytesWritten += n
+		}
+	}
+	if n, err := w.Write([]byte{'\n'}); err != nil {
+		return int64(bytesWritten + n), err
+	} else {
+		bytesWritten += n
+	}
+	return int64(bytesWritten), nil
 }
 
 func (m *Message) ID() (string, bool) {
@@ -113,11 +206,11 @@ func (m *Message) Retry() (time.Duration, bool) {
 	if m.event == nil {
 		return 0, false
 	}
-	return *m.retry, true
+	return time.Millisecond * time.Duration(*m.retryMilliseconds), true
 }
 
 func (m *Message) Data() string {
-	return string(m.data)
+	return m.data.String()
 }
 
 // MessageOption configures a Message.
@@ -156,7 +249,13 @@ func WithIntID(id int) MessageOption {
 // an integer count of milliseconds. A negative duration is floored to 0,
 // since the wire format cannot represent a negative reconnection time.
 func WithRetry(d time.Duration) MessageOption {
-	return func(m *Message) { m.retry = &d }
+	return func(m *Message) {
+		if d < 0 {
+			d = 0
+		}
+		ms := d.Milliseconds()
+		m.retryMilliseconds = &ms
+	}
 }
 
 var builderPool = sync.Pool{
@@ -167,37 +266,22 @@ var builderPool = sync.Pool{
 // data is split into one "data:" line per line; \r\n and \r line terminators
 // inside data are normalized to \n.
 func (res *Response) Message(data []byte, opts ...MessageOption) error {
-	m := Message{data: data}
+	m := Message{data: bytes.NewBuffer(data)}
 	for _, opt := range opts {
 		opt(&m)
 	}
-	if err := checkID(m.id); err != nil {
-		return err
-	}
-	if err := checkEvent(m.event); err != nil {
-		return err
-	}
-
 	if m.buf == nil {
 		b := builderPool.Get().(*bytes.Buffer)
 		defer builderPool.Put(b)
 		m.buf = b
 	}
 	defer m.buf.Reset()
-
-	if m.id != nil {
-		writeID(m.buf, *m.id)
+	if _, err := m.WriteTo(m.buf); err != nil {
+		return err
 	}
-	if m.event != nil && len(*m.event) > 0 {
-		writeEvent(m.buf, *m.event)
-	}
-	if m.retry != nil {
-		writeRetry(m.buf, *m.retry)
-	}
-	writeData(m.buf, data)
 
 	res.mut.Lock()
-	_, err := res.res.Write(m.buf.Bytes())
+	_, err := m.WriteTo(res.res)
 	res.flusher.Flush()
 	res.mut.Unlock()
 
@@ -240,64 +324,4 @@ func writeComment(buf *bytes.Buffer, text string) {
 		buf.WriteString(text)
 	}
 	buf.WriteString("\n\n")
-}
-
-func checkID(id *string) error {
-	if id != nil && strings.ContainsAny(*id, "\r\n\x00") {
-		return fmt.Errorf("%w: id %q", ErrInvalidField, *id)
-	}
-	return nil
-}
-
-func writeID(buf *bytes.Buffer, id string) {
-	buf.WriteString("id: ")
-	buf.WriteString(id)
-	buf.WriteByte('\n')
-}
-
-func checkEvent(event *string) error {
-	if event != nil && strings.ContainsAny(*event, "\r\n") {
-		return fmt.Errorf("%w: event %q", ErrInvalidField, *event)
-	}
-	return nil
-}
-
-func writeEvent(buf *bytes.Buffer, event string) {
-	buf.WriteString("event: ")
-	buf.WriteString(event)
-	buf.WriteByte('\n')
-}
-
-func writeRetry(buf *bytes.Buffer, retry time.Duration) {
-	ms := retry.Milliseconds()
-	if ms < 0 {
-		// A negative reconnection time can't be represented on the wire
-		// (the client only parses an all-ASCII-digits value), so floor it.
-		ms = 0
-	}
-	buf.WriteString("retry: ")
-	var scratch [20]byte // enough for any int64
-	if line := strconv.AppendInt(scratch[:0], ms, 10); len(line) > 0 {
-		buf.Write(line)
-	}
-	buf.WriteByte('\n')
-}
-
-func writeData(buf *bytes.Buffer, data []byte) {
-	if bytes.IndexByte(data, '\r') >= 0 {
-		// Normalize CRLF and bare CR to LF so no stray line terminators
-		// appear inside a data field on the wire.
-		data = bytes.ReplaceAll(data, []byte("\r\n"), []byte("\n"))
-		data = bytes.ReplaceAll(data, []byte{'\r'}, []byte{'\n'})
-	}
-	data = bytes.TrimSuffix(data, []byte{'\n'})
-
-	for line := range bytes.SplitSeq(data, []byte{'\n'}) {
-		buf.WriteString("data: ")
-		if len(line) > 0 {
-			buf.Write(line)
-		}
-		buf.WriteByte('\n')
-	}
-	buf.WriteByte('\n')
 }
