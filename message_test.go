@@ -164,7 +164,7 @@ func TestMessage_invalidFields(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, "/", nil)
 			r, _ := sse.New(rec, req, http.StatusOK)
 			err := r.Message([]byte("x"), tc.opts...)
-			if err == nil || !strings.Contains(err.Error(), "forbidden character") {
+			if !errors.Is(err, sse.ErrInvalidField) {
 				t.Errorf("err = %v, want errors.Is(_, ErrInvalidField)", err)
 			}
 			if rec.Body.Len() != 0 {

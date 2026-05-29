@@ -97,10 +97,10 @@ type Message struct {
 
 func (m *Message) WriteTo(w io.Writer) (int64, error) {
 	if m.id != nil && strings.ContainsAny(*m.id, "\r\n\x00") {
-		return 0, fmt.Errorf("sse: id contains a forbidden character")
+		return 0, fmt.Errorf("%w: id %q", ErrInvalidField, *m.id)
 	}
 	if m.event != nil && strings.ContainsAny(*m.event, "\r\n") {
-		return 0, fmt.Errorf("sse: event contains a forbidden character")
+		return 0, fmt.Errorf("%w: event %q", ErrInvalidField, *m.event)
 	}
 	var bytesWritten int
 	if m.id != nil {
@@ -203,7 +203,7 @@ func (m *Message) Event() (string, bool) {
 }
 
 func (m *Message) Retry() (time.Duration, bool) {
-	if m.event == nil {
+	if m.retryMilliseconds == nil {
 		return 0, false
 	}
 	return time.Millisecond * time.Duration(*m.retryMilliseconds), true
@@ -281,7 +281,7 @@ func (res *Response) Message(data []byte, opts ...MessageOption) error {
 	}
 
 	res.mut.Lock()
-	_, err := m.WriteTo(res.res)
+	_, err := m.buf.WriteTo(res.res)
 	res.flusher.Flush()
 	res.mut.Unlock()
 
