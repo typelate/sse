@@ -174,7 +174,35 @@ func (res *Response) Message(data []byte, opts ...MessageOption) error {
 		buf = &b.buf
 	}
 	buf.Reset()
-	encode(buf, &b.msg)
+	if b.msg.id != nil {
+		writeStringLine(buf, "id", *b.msg.id)
+	}
+	if b.msg.event != nil {
+		writeStringLine(buf, "event", *b.msg.event)
+	}
+	if b.msg.retry != nil {
+		ms := b.msg.retry.Milliseconds()
+		if ms < 0 {
+			// A negative reconnection time can't be represented on the wire
+			// (the client only parses an all-ASCII-digits value), so floor it.
+			ms = 0
+		}
+		var scratch [20]byte // enough for any int64
+		writeBytesLine(buf, "retry", strconv.AppendInt(scratch[:0], ms, 10))
+	}
+
+	if bytes.IndexByte(b.msg.data, '\r') >= 0 {
+		// Normalize CRLF and bare CR to LF so no stray line terminators
+		// appear inside a data field on the wire.
+		b.msg.data = bytes.ReplaceAll(b.msg.data, []byte("\r\n"), []byte("\n"))
+		b.msg.data = bytes.ReplaceAll(b.msg.data, []byte{'\r'}, []byte{'\n'})
+	}
+	b.msg.data = bytes.TrimSuffix(b.msg.data, []byte{'\n'})
+
+	for line := range bytes.SplitSeq(b.msg.data, []byte{'\n'}) {
+		writeBytesLine(buf, "data", line)
+	}
+	buf.WriteByte('\n')
 
 	res.mut.Lock()
 	_, err := res.res.Write(buf.Bytes())
@@ -225,41 +253,6 @@ func writeBytesLine(w *bytes.Buffer, prefix string, line []byte) {
 	w.WriteString(": ")
 	if len(line) > 0 {
 		w.Write(line)
-	}
-	w.WriteByte('\n')
-}
-
-// encode serializes msg into w. It uses direct buffer writes to avoid the
-// allocations from "field: "+value+"\n" string concatenation.
-func encode(w *bytes.Buffer, msg *Message) {
-	if msg.id != nil {
-		writeStringLine(w, "id", *msg.id)
-	}
-	if msg.event != nil {
-		writeStringLine(w, "event", *msg.event)
-	}
-	if msg.retry != nil {
-		ms := msg.retry.Milliseconds()
-		if ms < 0 {
-			// A negative reconnection time can't be represented on the wire
-			// (the client only parses an all-ASCII-digits value), so floor it.
-			ms = 0
-		}
-		var scratch [20]byte // enough for any int64
-		writeBytesLine(w, "retry", strconv.AppendInt(scratch[:0], ms, 10))
-	}
-
-	data := msg.data
-	if bytes.IndexByte(data, '\r') >= 0 {
-		// Normalize CRLF and bare CR to LF so no stray line terminators
-		// appear inside a data field on the wire.
-		data = bytes.ReplaceAll(data, []byte("\r\n"), []byte("\n"))
-		data = bytes.ReplaceAll(data, []byte{'\r'}, []byte{'\n'})
-	}
-	data = bytes.TrimSuffix(data, []byte{'\n'})
-
-	for line := range bytes.SplitSeq(data, []byte{'\n'}) {
-		writeBytesLine(w, "data", line)
 	}
 	w.WriteByte('\n')
 }
