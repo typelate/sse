@@ -157,10 +157,18 @@ func (res *Response) Message(data []byte, opts ...MessageOption) error {
 	}
 	buf.Reset()
 	if b.msg.id != nil {
-		writeStringLine(buf, "id", *b.msg.id)
+		buf.WriteString("id: ")
+		if len(*b.msg.id) > 0 {
+			buf.WriteString(*b.msg.id)
+		}
+		buf.WriteByte('\n')
 	}
 	if b.msg.event != nil {
-		writeStringLine(buf, "event", *b.msg.event)
+		buf.WriteString("event: ")
+		if len(*b.msg.event) > 0 {
+			buf.WriteString(*b.msg.event)
+		}
+		buf.WriteByte('\n')
 	}
 	if b.msg.retry != nil {
 		ms := b.msg.retry.Milliseconds()
@@ -169,8 +177,12 @@ func (res *Response) Message(data []byte, opts ...MessageOption) error {
 			// (the client only parses an all-ASCII-digits value), so floor it.
 			ms = 0
 		}
+		buf.WriteString("retry: ")
 		var scratch [20]byte // enough for any int64
-		writeBytesLine(buf, "retry", strconv.AppendInt(scratch[:0], ms, 10))
+		if line := strconv.AppendInt(scratch[:0], ms, 10); len(line) > 0 {
+			buf.Write(line)
+		}
+		buf.WriteByte('\n')
 	}
 
 	if bytes.IndexByte(b.msg.data, '\r') >= 0 {
@@ -182,7 +194,11 @@ func (res *Response) Message(data []byte, opts ...MessageOption) error {
 	b.msg.data = bytes.TrimSuffix(b.msg.data, []byte{'\n'})
 
 	for line := range bytes.SplitSeq(b.msg.data, []byte{'\n'}) {
-		writeBytesLine(buf, "data", line)
+		buf.WriteString("data: ")
+		if len(line) > 0 {
+			buf.Write(line)
+		}
+		buf.WriteByte('\n')
 	}
 	buf.WriteByte('\n')
 
@@ -204,8 +220,11 @@ func (res *Response) Comment(text string) error {
 	}
 	b := builderPool.Get().(*builder)
 	b.buf.Reset()
-	writeStringLine(&b.buf, "", text)
-	b.buf.WriteString("\n")
+	b.buf.WriteString(": ")
+	if len(text) > 0 {
+		b.buf.WriteString(text)
+	}
+	b.buf.WriteString("\n\n")
 
 	res.mut.Lock()
 	_, err := res.res.Write(b.buf.Bytes())
@@ -215,26 +234,4 @@ func (res *Response) Comment(text string) error {
 	builderPool.Put(b)
 
 	return err
-}
-
-func writeStringLine(w *bytes.Buffer, prefix, line string) {
-	if len(prefix) > 0 {
-		w.WriteString(prefix)
-	}
-	w.WriteString(": ")
-	if len(line) > 0 {
-		w.WriteString(line)
-	}
-	w.WriteByte('\n')
-}
-
-func writeBytesLine(w *bytes.Buffer, prefix string, line []byte) {
-	if len(prefix) > 0 {
-		w.WriteString(prefix)
-	}
-	w.WriteString(": ")
-	if len(line) > 0 {
-		w.Write(line)
-	}
-	w.WriteByte('\n')
 }
