@@ -85,10 +85,12 @@ func Source(response *http.Response, opts ...SourceOption) (iter.Seq[*Message], 
 		}
 
 		for {
+			t := time.NewTimer(retryDelay)
 			select {
 			case <-req.Context().Done():
+				t.Stop()
 				return
-			case <-time.After(retryDelay):
+			case <-t.C:
 			}
 
 			r := req.Clone(req.Context())
