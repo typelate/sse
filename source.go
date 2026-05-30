@@ -117,6 +117,12 @@ const (
 	// overflow when converting milliseconds to time.Duration (nanoseconds).
 	maxRetryDelay = 24 * time.Hour
 	maxRetryMS    = int64(maxRetryDelay / time.Millisecond)
+
+	// maxEventDataSize is the maximum number of bytes accumulated in the data
+	// buffer for a single event. Additional data: lines are silently dropped
+	// once this limit is reached, bounding memory use against a server that
+	// streams millions of data: lines without a blank-line terminator.
+	maxEventDataSize = 10 << 20 // 10 MiB
 )
 
 func parseSSEStream(r io.Reader, dataBuf *bytes.Buffer, lastEventID *string, retryDelay *time.Duration, yield func(*Message) bool) bool {
@@ -161,10 +167,16 @@ func parseSSEStream(r io.Reader, dataBuf *bytes.Buffer, lastEventID *string, ret
 		case "":
 			// comment — ignore
 		case "data":
+			sep := 0
 			if dataBuf.Len() > 0 {
-				dataBuf.WriteByte('\n')
+				sep = 1
 			}
-			dataBuf.WriteString(fieldValue)
+			if dataBuf.Len()+len(fieldValue)+sep <= maxEventDataSize {
+				if sep > 0 {
+					dataBuf.WriteByte('\n')
+				}
+				dataBuf.WriteString(fieldValue)
+			}
 		case "id":
 			if !strings.ContainsRune(fieldValue, '\x00') {
 				v := fieldValue
