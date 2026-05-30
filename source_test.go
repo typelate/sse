@@ -330,6 +330,54 @@ func TestSource_oversizedLine(t *testing.T) {
 	}
 }
 
+// TestSource_withClientNil verifies that WithClient(nil) is a no-op and the
+// default client is used for reconnection, rather than panicking.
+func TestSource_withClientNil(t *testing.T) {
+	var connections atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		n := connections.Add(1)
+		r, _ := sse.New(w, req, http.StatusOK)
+		switch n {
+		case 1:
+			if err := r.Message([]byte("first"), sse.WithRetry(time.Millisecond)); err != nil {
+				t.Error(err)
+			}
+		case 2:
+			if err := r.Message([]byte("second")); err != nil {
+				t.Error(err)
+			}
+		default:
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+
+	seq, err := sse.Source(res, sse.WithClient(nil), sse.WithClient(srv.Client()))
+	if err != nil {
+		t.Fatalf("Source: %v", err)
+	}
+	var msgs []*sse.Message
+	for m := range seq {
+		msgs = append(msgs, m)
+		if len(msgs) == 2 {
+			break
+		}
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("WithClient(nil) caused %d messages (want 2); likely panicked or didn't reconnect", len(msgs))
+	}
+}
+
 // TestSource_reconnect verifies that Source reconnects after EOF, sends the
 // Last-Event-ID header from the last received event, and yields messages from
 // the new connection. The server uses retry:1 to keep the test fast.

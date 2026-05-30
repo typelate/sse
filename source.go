@@ -23,7 +23,11 @@ type sourceConfig struct {
 // WithClient configures the HTTP client Source uses when reconnecting.
 // Defaults to http.DefaultClient.
 func WithClient(c *http.Client) SourceOption {
-	return func(cfg *sourceConfig) { cfg.client = c }
+	return func(cfg *sourceConfig) {
+		if c != nil {
+			cfg.client = c
+		}
+	}
 }
 
 // WithSourceBuffer provides a caller-owned bytes.Buffer for accumulating data
