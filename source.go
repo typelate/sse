@@ -21,7 +21,9 @@ type sourceConfig struct {
 }
 
 // WithClient configures the HTTP client Source uses when reconnecting.
-// Defaults to http.DefaultClient.
+// Defaults to http.DefaultClient, which follows redirects automatically.
+// In security-sensitive environments supply a client with a CheckRedirect
+// policy that rejects unexpected redirect targets to prevent SSRF.
 func WithClient(c *http.Client) SourceOption {
 	return func(cfg *sourceConfig) {
 		if c != nil {
