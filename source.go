@@ -109,6 +109,16 @@ func Source(response *http.Response, opts ...SourceOption) (iter.Seq[*Message], 
 	}, nil
 }
 
+const (
+	// minRetryDelay is the floor applied to any server-supplied retry value,
+	// preventing a retry: 0 from spinning the reconnect loop at CPU speed.
+	minRetryDelay = time.Millisecond
+	// maxRetryDelay caps the server-supplied retry value to prevent int64
+	// overflow when converting milliseconds to time.Duration (nanoseconds).
+	maxRetryDelay = 24 * time.Hour
+	maxRetryMS    = int64(maxRetryDelay / time.Millisecond)
+)
+
 func parseSSEStream(r io.Reader, dataBuf *bytes.Buffer, lastEventID *string, retryDelay *time.Duration, yield func(*Message) bool) bool {
 	scanner := bufio.NewScanner(r)
 	var (
@@ -126,7 +136,8 @@ func parseSSEStream(r io.Reader, dataBuf *bytes.Buffer, lastEventID *string, ret
 				*lastEventID = *id
 			}
 			if retry != nil {
-				*retryDelay = time.Duration(*retry) * time.Millisecond
+				ms := min(*retry, maxRetryMS)
+				*retryDelay = max(time.Duration(ms)*time.Millisecond, minRetryDelay)
 			}
 			m := &Message{
 				id:                id,
