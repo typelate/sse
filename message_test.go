@@ -283,3 +283,26 @@ func TestEndToEnd(t *testing.T) {
 		t.Errorf("body = %q\nwant %q", body, want)
 	}
 }
+
+func TestMessage_WithEventEmpty_suppressesField(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	r, _ := sse.New(rec, req, http.StatusOK)
+	if err := r.Message([]byte("x"), sse.WithEvent("")); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := rec.Body.String(), "data: x\n\n"; got != want {
+		t.Errorf("body = %q, want %q (WithEvent(\"\") must not emit an event: field)", got, want)
+	}
+}
+
+func TestMessage_WriteTo_zeroValue(t *testing.T) {
+	var m sse.Message
+	var buf bytes.Buffer
+	if _, err := m.WriteTo(&buf); err != nil {
+		t.Fatalf("WriteTo on zero-value Message: %v", err)
+	}
+	if got := m.Data(); got != "" {
+		t.Errorf("Data() on zero-value Message = %q, want \"\"", got)
+	}
+}

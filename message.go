@@ -120,7 +120,7 @@ func (m *Message) WriteTo(w io.Writer) (int64, error) {
 			bytesWritten += n
 		}
 	}
-	if m.event != nil {
+	if m.event != nil && len(*m.event) > 0 {
 		if n, err := io.WriteString(w, "event: "); err != nil {
 			return int64(bytesWritten + n), err
 		} else {
@@ -155,7 +155,10 @@ func (m *Message) WriteTo(w io.Writer) (int64, error) {
 			bytesWritten += n
 		}
 	}
-	data := m.data.Bytes()
+	var data []byte
+	if m.data != nil {
+		data = m.data.Bytes()
+	}
 	if bytes.IndexByte(data, '\r') >= 0 {
 		data = bytes.ReplaceAll(data, []byte("\r\n"), []byte("\n"))
 		data = bytes.ReplaceAll(data, []byte("\r"), []byte("\n"))
@@ -210,6 +213,9 @@ func (m *Message) Retry() (time.Duration, bool) {
 }
 
 func (m *Message) Data() string {
+	if m.data == nil {
+		return ""
+	}
 	return m.data.String()
 }
 
