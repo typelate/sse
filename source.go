@@ -179,5 +179,5 @@ func parseSSEStream(r io.Reader, dataBuf *bytes.Buffer, lastEventID *string, ret
 			}
 		}
 	}
-	return true
+	return scanner.Err() == nil
 }

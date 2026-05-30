@@ -2,8 +2,10 @@ package sse_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -282,6 +284,49 @@ func TestSource_endToEnd(t *testing.T) {
 	}
 	if got := msgs[1].Data(); got != "multi\nline" {
 		t.Errorf("msgs[1].Data() = %q, want %q", got, "multi\nline")
+	}
+}
+
+// TestSource_oversizedLine verifies that a data: line exceeding bufio's 64 KB
+// default token limit causes Source to stop iterating (no reconnect) rather
+// than silently discarding events and looping forever.
+func TestSource_oversizedLine(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		r, _ := sse.New(w, req, http.StatusOK)
+		if err := r.Message([]byte("before")); err != nil {
+			t.Error(err)
+		}
+		// Write a data: line exceeding bufio.MaxScanTokenSize (64 KB).
+		fmt.Fprintf(w, "data: %s\n\ndata: after\n\n", strings.Repeat("x", 1<<17))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+	}))
+	defer srv.Close()
+
+	res, err := http.Get(srv.URL) //nolint:noctx
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+
+	seq, err := sse.Source(res)
+	if err != nil {
+		t.Fatalf("Source: %v", err)
+	}
+	var msgs []*sse.Message
+	for m := range seq {
+		msgs = append(msgs, m)
+	}
+	// "before" arrives before the oversized line; "after" must not appear.
+	if len(msgs) != 1 || msgs[0].Data() != "before" {
+		t.Errorf("got %d messages (%v), want exactly [before]", len(msgs), func() []string {
+			var d []string
+			for _, m := range msgs {
+				d = append(d, m.Data())
+			}
+			return d
+		}())
 	}
 }
 

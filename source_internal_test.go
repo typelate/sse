@@ -7,6 +7,17 @@ import (
 	"time"
 )
 
+func TestParseSSEStream_scannerErrorReturnsFalse(t *testing.T) {
+	// A line exceeding bufio's default 64 KB token limit causes ErrTooLong.
+	longLine := "data: " + strings.Repeat("x", 1<<17)
+	var buf bytes.Buffer
+	var lastEventID string
+	delay := 3 * time.Second
+	if parseSSEStream(strings.NewReader(longLine), &buf, &lastEventID, &delay, func(*Message) bool { return true }) {
+		t.Error("parseSSEStream returned true (keepGoing) on scanner error, want false")
+	}
+}
+
 func TestParseSSEStream_retryDelayClamp(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
