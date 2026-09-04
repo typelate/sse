@@ -351,6 +351,24 @@ func TestNewMessage(t *testing.T) {
 			want:  "data: hello\n\n",
 		},
 		{
+			name:  "CRLF starts a new data line",
+			write: func(t *testing.T, m *sse.Message) { mustWriteString(t, m, "a\r\nb") },
+			want:  "data: a\ndata: b\n\n",
+		},
+		{
+			name:  "bare CR starts a new data line",
+			write: func(t *testing.T, m *sse.Message) { mustWriteString(t, m, "a\rb") },
+			want:  "data: a\ndata: b\n\n",
+		},
+		{
+			name: "CRLF split across writes counts as one line break",
+			write: func(t *testing.T, m *sse.Message) {
+				mustWriteString(t, m, "a\r")
+				mustWriteString(t, m, "\nb")
+			},
+			want: "data: a\ndata: b\n\n",
+		},
+		{
 			name:  "options configure the message",
 			opts:  []sse.MessageOption{sse.WithID("1"), sse.WithEvent("greet")},
 			write: func(t *testing.T, m *sse.Message) { mustWriteString(t, m, "hello") },
