@@ -93,6 +93,15 @@ type Message struct {
 	event             *string
 	retryMilliseconds *int64
 	buf, data         *bytes.Buffer
+
+	// dataPrefix is the prefix the most recent writer left in effect. A
+	// write from a different writer terminates the current line first.
+	dataPrefix string
+
+	// pendingCR records that the last byte written was a CR, whose line
+	// break has already been emitted. It lets a CRLF straddling two writes
+	// count as one break rather than two.
+	pendingCR bool
 }
 
 func (m *Message) WriteTo(w io.Writer) (int64, error) {
@@ -191,6 +200,136 @@ func (m *Message) WriteTo(w io.Writer) (int64, error) {
 	return int64(bytesWritten), nil
 }
 
+// NewMessage returns a Message configured by opts, ready to have its data
+// written in with Write. Send dispatches it.
+//
+// A Message under construction is not safe for concurrent use.
+func NewMessage(opts ...MessageOption) *Message {
+	var m Message
+	for _, opt := range opts {
+		opt(&m)
+	}
+	return &m
+}
+
+// Write appends p to the message data, implementing io.Writer. The data is
+// split into "data:" lines when the message is sent, so a newline in p
+// starts a new data line.
+func (m *Message) Write(p []byte) (int, error) {
+	return m.writeData("", p)
+}
+
+// Prefix returns an io.Writer that begins every data line it writes with
+// prefix, for wire formats that key their data lines. Datastar, for example,
+// writes an element patch as:
+//
+//	io.WriteString(m.Prefix("selector "), "#foo")
+//	io.WriteString(m.Prefix("mode "), "inner")
+//	err := tmpl.Execute(m.Prefix("elements "), page)
+//
+//	event: datastar-patch-elements
+//	data: selector #foo
+//	data: mode inner
+//	data: elements <div>hi</div>
+//
+// Prefix terminates any partially written line, so each call starts a new
+// data line. Writers stay usable after a later call: writing to an earlier
+// one terminates the current line and resumes that writer's prefix. A writer
+// that is never written to contributes nothing.
+//
+// The prefix is written verbatim, so include any separator the format wants
+// ("elements ", not "elements"). A prefix containing CR or LF is rejected:
+// every Write on the returned writer fails with ErrInvalidField.
+func (m *Message) Prefix(prefix string) io.Writer {
+	if strings.ContainsAny(prefix, "\r\n") {
+		return dataWriter{err: fmt.Errorf("%w: data line prefix %q", ErrInvalidField, prefix)}
+	}
+	m.endDataLine()
+	m.dataPrefix = prefix
+	return dataWriter{m: m, prefix: prefix}
+}
+
+// dataWriter writes into its Message's data buffer, repeating prefix at the
+// start of every line. A non-nil err rejects every write, so a prefix the
+// wire format forbids fails at the point of use.
+type dataWriter struct {
+	m      *Message
+	prefix string
+	err    error
+}
+
+func (w dataWriter) Write(p []byte) (int, error) {
+	if w.err != nil {
+		return 0, w.err
+	}
+	return w.m.writeData(w.prefix, p)
+}
+
+// writeData appends p to the data buffer with prefix at the start of every
+// line, taking over from whichever writer wrote last.
+//
+// CR and CRLF are normalized to LF here rather than left to WriteTo: the
+// prefixes are inlined into the buffer, so a break WriteTo discovered later
+// would open a line that no longer gets a prefix.
+func (m *Message) writeData(prefix string, p []byte) (int, error) {
+	if m.data == nil {
+		m.data = bytes.NewBuffer(nil)
+	}
+	if m.dataPrefix != prefix {
+		m.endDataLine()
+		m.dataPrefix = prefix
+	}
+	consumed := len(p)
+	for len(p) > 0 {
+		if m.pendingCR {
+			m.pendingCR = false
+			if p[0] == '\n' {
+				// The LF half of a CRLF split across two writes;
+				// its break was emitted with the CR.
+				p = p[1:]
+				continue
+			}
+		}
+		i := bytes.IndexAny(p, "\r\n")
+		if i < 0 {
+			m.startDataLine()
+			m.data.Write(p)
+			break
+		}
+		m.startDataLine()
+		m.data.Write(p[:i])
+		m.data.WriteByte('\n')
+		if p[i] == '\r' {
+			m.pendingCR = true
+		}
+		p = p[i+1:]
+	}
+	return consumed, nil
+}
+
+// startDataLine writes the current prefix if the buffer sits at the start of
+// a line, so that even an empty line carries its prefix.
+func (m *Message) startDataLine() {
+	if m.atDataLineStart() {
+		m.data.WriteString(m.dataPrefix)
+	}
+}
+
+// endDataLine terminates a partially written line so the next write starts
+// on a fresh one. A dangling CR belongs to the writer being left behind, so
+// the next writer's leading LF is a break of its own.
+func (m *Message) endDataLine() {
+	if m.data != nil && !m.atDataLineStart() {
+		m.data.WriteByte('\n')
+	}
+	m.pendingCR = false
+}
+
+func (m *Message) atDataLineStart() bool {
+	b := m.data.Bytes()
+	return len(b) == 0 || b[len(b)-1] == '\n'
+}
+
 func (m *Message) ID() (string, bool) {
 	if m.id == nil {
 		return "", false
@@ -276,18 +415,26 @@ func (res *Response) Message(data []byte, opts ...MessageOption) error {
 	for _, opt := range opts {
 		opt(&m)
 	}
-	if m.buf == nil {
+	return res.Send(&m)
+}
+
+// Send writes m to the client and flushes the connection. It is safe to call
+// from multiple goroutines; building m is not.
+func (res *Response) Send(m *Message) error {
+	buf := m.buf
+	if buf == nil {
 		b := builderPool.Get().(*bytes.Buffer)
 		defer builderPool.Put(b)
-		m.buf = b
+		buf = b
 	}
-	defer m.buf.Reset()
-	if _, err := m.WriteTo(m.buf); err != nil {
+	buf.Reset()
+	defer buf.Reset()
+	if _, err := m.WriteTo(buf); err != nil {
 		return err
 	}
 
 	res.mut.Lock()
-	_, err := m.buf.WriteTo(res.res)
+	_, err := buf.WriteTo(res.res)
 	res.flusher.Flush()
 	res.mut.Unlock()
 

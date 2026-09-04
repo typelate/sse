@@ -2,6 +2,7 @@ package sse_test
 
 import (
 	"bytes"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -125,6 +126,30 @@ func BenchmarkMessage_parallel(b *testing.B) {
 			}
 		}
 	})
+}
+
+// BenchmarkSend_prefixed measures a keyed multi-line payload in the shape
+// Datastar uses: three values, the last spanning three lines.
+func BenchmarkSend_prefixed(b *testing.B) {
+	r := newBenchResponse(b)
+	elements := []byte("<div>\n  hello\n</div>")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		m := sse.NewMessage(sse.WithEvent("datastar-patch-elements"))
+		if _, err := io.WriteString(m.Prefix("selector "), "#foo"); err != nil {
+			b.Fatal(err)
+		}
+		if _, err := io.WriteString(m.Prefix("mode "), "inner"); err != nil {
+			b.Fatal(err)
+		}
+		if _, err := m.Prefix("elements ").Write(elements); err != nil {
+			b.Fatal(err)
+		}
+		if err := r.Send(m); err != nil {
+			b.Fatal(err)
+		}
+	}
 }
 
 func BenchmarkComment(b *testing.B) {
