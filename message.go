@@ -231,20 +231,20 @@ func (m *Message) Write(p []byte) (int, error) {
 	return m.writeData("", p)
 }
 
-// Prefix returns an io.Writer that begins every data line it writes with
+// PrefixWriter returns an io.Writer that begins every data line it writes with
 // prefix, for wire formats that key their data lines. Datastar, for example,
 // writes an element patch as:
 //
-//	io.WriteString(m.Prefix("selector "), "#foo")
-//	io.WriteString(m.Prefix("mode "), "inner")
-//	err := tmpl.Execute(m.Prefix("elements "), page)
+//	io.WriteString(m.PrefixWriter("selector "), "#foo")
+//	io.WriteString(m.PrefixWriter("mode "), "inner")
+//	err := tmpl.Execute(m.PrefixWriter("elements "), page)
 //
 //	event: datastar-patch-elements
 //	data: selector #foo
 //	data: mode inner
 //	data: elements <div>hi</div>
 //
-// Prefix terminates any partially written line, so each call starts a new
+// PrefixWriter terminates any partially written line, so each call starts a new
 // data line. Writers stay usable after a later call: writing to an earlier
 // one terminates the current line and resumes that writer's prefix. A writer
 // that is never written to contributes nothing.
@@ -255,7 +255,7 @@ func (m *Message) Write(p []byte) (int, error) {
 // The prefix is written verbatim, so include any separator the format wants
 // ("elements ", not "elements"). A prefix containing CR or LF is rejected:
 // every Write on the returned writer fails with ErrInvalidField.
-func (m *Message) Prefix(prefix string) io.Writer {
+func (m *Message) PrefixWriter(prefix string) io.Writer {
 	if err := checkDataPrefix(prefix); err != nil {
 		return dataWriter{m: m, err: err}
 	}
@@ -264,12 +264,12 @@ func (m *Message) Prefix(prefix string) io.Writer {
 	return dataWriter{m: m, prefix: prefix}
 }
 
-// StringPrefix writes value as data lines beginning with prefix, the common
+// PrefixString writes value as data lines beginning with prefix, the common
 // case of a keyed field whose value is already a string:
 //
-//	m.StringPrefix("selector ", "#foo")   // data: selector #foo
+//	m.PrefixString("selector ", "#foo")   // data: selector #foo
 //
-// It is [Message.Prefix] plus the write, without the io.Writer in between,
+// It is [Message.PrefixWriter] plus the write, without the io.Writer in between,
 // so it neither boxes a writer nor copies value. Line breaks in value are
 // recognized as in [Message.Write], and every resulting line carries the
 // prefix.
@@ -278,7 +278,7 @@ func (m *Message) Prefix(prefix string) io.Writer {
 // fail, and an unusable prefix is a mistake in the calling code rather than
 // in the data. Send reports it, as it already does for an invalid id or
 // event.
-func (m *Message) StringPrefix(prefix, value string) {
+func (m *Message) PrefixString(prefix, value string) {
 	if err := checkDataPrefix(prefix); err != nil {
 		m.setErr(err)
 		return

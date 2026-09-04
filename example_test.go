@@ -48,11 +48,11 @@ func Example() {
 	//
 }
 
-// ExampleMessage_Prefix builds a Datastar element patch. Datastar keys each
+// ExampleMessage_PrefixWriter builds a Datastar element patch. Datastar keys each
 // data line, so every value is written through its own prefixed writer and a
 // multi-line value repeats its key — which lets a template render straight
 // into the stream.
-func ExampleMessage_Prefix() {
+func ExampleMessage_PrefixWriter() {
 	tmpl := template.Must(template.New("greeting").Parse("<div>\n  {{.}}\n</div>"))
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -63,9 +63,9 @@ func ExampleMessage_Prefix() {
 		}
 
 		m := sse.NewMessage(sse.WithEvent("datastar-patch-elements"))
-		m.StringPrefix("selector ", "#foo")
-		m.StringPrefix("mode ", "inner")
-		if err := tmpl.Execute(m.Prefix("elements "), "Hello world!"); err != nil {
+		m.PrefixString("selector ", "#foo")
+		m.PrefixString("mode ", "inner")
+		if err := tmpl.Execute(m.PrefixWriter("elements "), "Hello world!"); err != nil {
 			log.Print(err)
 			return
 		}
