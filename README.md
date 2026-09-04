@@ -20,19 +20,21 @@ data: elements </div>
 
 ```
 
-Build one with `NewMessage` and a writer per key. `Prefix` repeats its argument on every line it writes, so a template can render straight into the stream:
+Build one with `NewMessage`, writing each key's value with its prefix. `StringPrefix` takes a value you already have; `Prefix` hands back an `io.Writer` for one you want to stream, so a template can render straight into the message:
 
 ```go
 m := sse.NewMessage(sse.WithEvent("datastar-patch-elements"))
-io.WriteString(m.Prefix("selector "), "#foo")
-io.WriteString(m.Prefix("mode "), "inner")
+m.StringPrefix("selector ", "#foo")
+m.StringPrefix("mode ", "inner")
 if err := tmpl.Execute(m.Prefix("elements "), page); err != nil {
 	return err
 }
 return stream.Send(m)
 ```
 
-Each call to `Prefix` terminates the line the previous writer left open, so every value starts on a fresh data line. Writers stay usable afterwards — writing to an earlier one resumes its prefix on a new line — and a writer that is never written to contributes nothing.
+Both repeat the prefix on every line of a multi-line value, and both terminate the line the previous one left open, so every value starts on a fresh data line. `Prefix` writers stay usable afterwards — writing to an earlier one resumes its prefix on a new line — and a `Prefix` writer that is never written to contributes nothing, where `StringPrefix` always writes its line.
 
-`*Message` is itself an `io.Writer` for unkeyed data.
+`StringPrefix` returns nothing to check: writing to a buffer cannot fail, and a prefix containing CR or LF is a mistake in the calling code, reported by `Send` the way an invalid id or event already is.
+
+`*Message` is itself an `io.Writer` for unkeyed data, and the writers from `Prefix` implement `io.StringWriter`.
 

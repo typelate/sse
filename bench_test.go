@@ -152,6 +152,26 @@ func BenchmarkSend_prefixed(b *testing.B) {
 	}
 }
 
+// BenchmarkSend_stringPrefix is BenchmarkSend_prefixed with the two scalar
+// keys written by StringPrefix instead of through an io.Writer.
+func BenchmarkSend_stringPrefix(b *testing.B) {
+	r := newBenchResponse(b)
+	elements := []byte("<div>\n  hello\n</div>")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		m := sse.NewMessage(sse.WithEvent("datastar-patch-elements"))
+		m.StringPrefix("selector ", "#foo")
+		m.StringPrefix("mode ", "inner")
+		if _, err := m.Prefix("elements ").Write(elements); err != nil {
+			b.Fatal(err)
+		}
+		if err := r.Send(m); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func BenchmarkComment(b *testing.B) {
 	r := newBenchResponse(b)
 	b.ReportAllocs()

@@ -595,10 +595,160 @@ func TestMessage_Prefix_invalid(t *testing.T) {
 			if n != 0 {
 				t.Errorf("Prefix(%q).Write() = %d, want 0", prefix, n)
 			}
+
+			n, err = m.Prefix(prefix).(io.StringWriter).WriteString("dropped")
+			if !errors.Is(err, sse.ErrInvalidField) {
+				t.Errorf("Prefix(%q).WriteString() error = %v, want errors.Is(_, ErrInvalidField)", prefix, err)
+			}
+			if n != 0 {
+				t.Errorf("Prefix(%q).WriteString() = %d, want 0", prefix, n)
+			}
 			if got, want := m.Data(), "ok kept"; got != want {
 				t.Errorf("Data() = %q, want %q (a rejected prefix must not disturb the message)", got, want)
 			}
 		})
+	}
+}
+
+func TestMessage_StringPrefix(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		opts  []sse.MessageOption
+		write func(t *testing.T, m *sse.Message)
+		want  string
+	}{
+		{
+			name:  "writes a keyed data line",
+			write: func(t *testing.T, m *sse.Message) { m.StringPrefix("mode ", "inner") },
+			want:  "data: mode inner\n\n",
+		},
+		{
+			name: "each call is its own data line",
+			opts: []sse.MessageOption{sse.WithEvent("datastar-patch-elements")},
+			write: func(t *testing.T, m *sse.Message) {
+				m.StringPrefix("selector ", "#foo")
+				m.StringPrefix("mode ", "inner")
+			},
+			want: "event: datastar-patch-elements\ndata: selector #foo\ndata: mode inner\n\n",
+		},
+		{
+			name:  "a multi-line value repeats the prefix",
+			write: func(t *testing.T, m *sse.Message) { m.StringPrefix("e ", "<div>\n  hi\n</div>") },
+			want:  "data: e <div>\ndata: e   hi\ndata: e </div>\n\n",
+		},
+		{
+			name:  "CRLF and bare CR are line breaks",
+			write: func(t *testing.T, m *sse.Message) { m.StringPrefix("e ", "a\r\nb\rc") },
+			want:  "data: e a\ndata: e b\ndata: e c\n\n",
+		},
+		{
+			name:  "an empty value still writes its line",
+			write: func(t *testing.T, m *sse.Message) { m.StringPrefix("onlyIfMissing ", "") },
+			want:  "data: onlyIfMissing \n\n",
+		},
+		{
+			name: "it terminates a line left open by a Prefix writer",
+			write: func(t *testing.T, m *sse.Message) {
+				mustWriteString(t, m.Prefix("a "), "x")
+				m.StringPrefix("b ", "y")
+			},
+			want: "data: a x\ndata: b y\n\n",
+		},
+		{
+			name: "a Prefix writer resumes after it",
+			write: func(t *testing.T, m *sse.Message) {
+				w := m.Prefix("a ")
+				mustWriteString(t, w, "x")
+				m.StringPrefix("b ", "y")
+				mustWriteString(t, w, "z")
+			},
+			want: "data: a x\ndata: b y\ndata: a z\n\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			r, ok := sse.New(rec, req, http.StatusOK)
+			if !ok {
+				t.Fatal("New failed")
+			}
+
+			m := sse.NewMessage(tc.opts...)
+			tc.write(t, m)
+			if err := r.Send(m); err != nil {
+				t.Fatalf("Send: %v", err)
+			}
+
+			if got := rec.Body.String(); got != tc.want {
+				t.Errorf("body = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// StringPrefix has no error to return, so an unusable prefix has to surface
+// at Send, the way an invalid id or event already does.
+func TestMessage_StringPrefix_invalidPrefixReportedBySend(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	r, _ := sse.New(rec, req, http.StatusOK)
+
+	m := sse.NewMessage()
+	m.StringPrefix("ok ", "kept")
+	m.StringPrefix("bad\n", "dropped")
+
+	if err := r.Send(m); !errors.Is(err, sse.ErrInvalidField) {
+		t.Errorf("Send() error = %v, want errors.Is(_, ErrInvalidField)", err)
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("body should stay empty when validation fails, got %q", rec.Body.String())
+	}
+}
+
+// A rejected Prefix writer records the failure too, so both paths report an
+// unusable prefix the same way rather than one failing loudly and the other
+// only when its Write error is checked.
+func TestMessage_Prefix_invalidPrefixReportedBySend(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	r, _ := sse.New(rec, req, http.StatusOK)
+
+	m := sse.NewMessage()
+	mustWriteString(t, m.Prefix("ok "), "kept")
+	_, _ = m.Prefix("bad\n").Write([]byte("dropped"))
+
+	if err := r.Send(m); !errors.Is(err, sse.ErrInvalidField) {
+		t.Errorf("Send() error = %v, want errors.Is(_, ErrInvalidField)", err)
+	}
+}
+
+// The point of StringPrefix is to avoid the two allocations the io.Writer
+// form costs: boxing dataWriter into an interface, and io.WriteString copying
+// the string because dataWriter had no WriteString method.
+func TestMessage_StringPrefix_doesNotAllocate(t *testing.T) {
+	m := sse.NewMessage()
+	m.StringPrefix("grow ", strings.Repeat("x", 64*1024)) // pre-grow the buffer
+
+	if got := testing.AllocsPerRun(100, func() {
+		m.StringPrefix("mode ", "inner")
+	}); got != 0 {
+		t.Errorf("StringPrefix allocated %v times per call, want 0", got)
+	}
+}
+
+func TestMessage_Prefix_writerImplementsStringWriter(t *testing.T) {
+	m := sse.NewMessage()
+
+	w := m.Prefix("e ")
+	sw, ok := w.(io.StringWriter)
+	if !ok {
+		t.Fatalf("Prefix returned %T, which does not implement io.StringWriter; io.WriteString would copy the string into a []byte", w)
+	}
+	if _, err := sw.WriteString("a\nb"); err != nil {
+		t.Fatalf("WriteString: %v", err)
+	}
+	if got, want := m.Data(), "e a\ne b"; got != want {
+		t.Errorf("Data() = %q, want %q", got, want)
 	}
 }
 
