@@ -101,7 +101,7 @@ func BenchmarkMessage_largePayload(b *testing.B) {
 func BenchmarkMessage_withCallerBuffer(b *testing.B) {
 	r := newBenchResponse(b)
 	data := []byte("hello")
-	var pool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
+	pool := sync.Pool{New: func() any { return new(bytes.Buffer) }}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
