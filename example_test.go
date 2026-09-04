@@ -63,13 +63,15 @@ func ExampleMessage_Prefix() {
 		}
 
 		m := sse.NewMessage(sse.WithEvent("datastar-patch-elements"))
-		_, _ = io.WriteString(m.Prefix("selector "), "#foo")
-		_, _ = io.WriteString(m.Prefix("mode "), "inner")
+		m.StringPrefix("selector ", "#foo")
+		m.StringPrefix("mode ", "inner")
 		if err := tmpl.Execute(m.Prefix("elements "), "Hello world!"); err != nil {
 			log.Print(err)
 			return
 		}
-		_ = stream.Send(m)
+		if err := stream.Send(m); err != nil {
+			log.Print(err)
+		}
 	})
 	srv := httptest.NewServer(handler)
 	defer srv.Close()

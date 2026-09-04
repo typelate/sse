@@ -102,9 +102,17 @@ type Message struct {
 	// break has already been emitted. It lets a CRLF straddling two writes
 	// count as one break rather than two.
 	pendingCR bool
+
+	// err is the first failure met while building the data, held until the
+	// message is sent because the writers have no useful moment to return
+	// it.
+	err error
 }
 
 func (m *Message) WriteTo(w io.Writer) (int64, error) {
+	if m.err != nil {
+		return 0, m.err
+	}
 	if m.id != nil && strings.ContainsAny(*m.id, "\r\n\x00") {
 		return 0, fmt.Errorf("%w: id %q", ErrInvalidField, *m.id)
 	}
@@ -248,17 +256,63 @@ func (m *Message) Write(p []byte) (int, error) {
 // ("elements ", not "elements"). A prefix containing CR or LF is rejected:
 // every Write on the returned writer fails with ErrInvalidField.
 func (m *Message) Prefix(prefix string) io.Writer {
-	if strings.ContainsAny(prefix, "\r\n") {
-		return dataWriter{err: fmt.Errorf("%w: data line prefix %q", ErrInvalidField, prefix)}
+	if err := checkDataPrefix(prefix); err != nil {
+		return dataWriter{m: m, err: err}
 	}
 	m.endDataLine()
 	m.dataPrefix = prefix
 	return dataWriter{m: m, prefix: prefix}
 }
 
+// StringPrefix writes value as data lines beginning with prefix, the common
+// case of a keyed field whose value is already a string:
+//
+//	m.StringPrefix("selector ", "#foo")   // data: selector #foo
+//
+// It is [Message.Prefix] plus the write, without the io.Writer in between,
+// so it neither boxes a writer nor copies value. Line breaks in value are
+// recognized as in [Message.Write], and every resulting line carries the
+// prefix.
+//
+// There is nothing to report at the call site: writing to a buffer cannot
+// fail, and an unusable prefix is a mistake in the calling code rather than
+// in the data. Send reports it, as it already does for an invalid id or
+// event.
+func (m *Message) StringPrefix(prefix, value string) {
+	if err := checkDataPrefix(prefix); err != nil {
+		m.setErr(err)
+		return
+	}
+	if m.data == nil {
+		m.data = bytes.NewBuffer(nil)
+	}
+	m.endDataLine()
+	m.dataPrefix = prefix
+	// Open the line before writing, so an empty value still produces one.
+	// Calling this method is itself the request for the line, where asking
+	// Prefix for a writer and never using it is not.
+	m.startDataLine()
+	m.writeDataString(prefix, value)
+}
+
+func checkDataPrefix(prefix string) error {
+	if strings.ContainsAny(prefix, "\r\n") {
+		return fmt.Errorf("%w: data line prefix %q", ErrInvalidField, prefix)
+	}
+	return nil
+}
+
+// setErr keeps the first failure. It is reported when the message is sent.
+func (m *Message) setErr(err error) {
+	if m.err == nil {
+		m.err = err
+	}
+}
+
 // dataWriter writes into its Message's data buffer, repeating prefix at the
 // start of every line. A non-nil err rejects every write, so a prefix the
-// wire format forbids fails at the point of use.
+// wire format forbids fails at the point of use and again at Send, whether
+// or not the caller checked.
 type dataWriter struct {
 	m      *Message
 	prefix string
@@ -267,9 +321,20 @@ type dataWriter struct {
 
 func (w dataWriter) Write(p []byte) (int, error) {
 	if w.err != nil {
+		w.m.setErr(w.err)
 		return 0, w.err
 	}
 	return w.m.writeData(w.prefix, p)
+}
+
+// WriteString implements io.StringWriter so io.WriteString reaches the string
+// path directly instead of copying s into a []byte.
+func (w dataWriter) WriteString(s string) (int, error) {
+	if w.err != nil {
+		w.m.setErr(w.err)
+		return 0, w.err
+	}
+	return w.m.writeDataString(w.prefix, s)
 }
 
 // writeData appends p to the data buffer with prefix at the start of every
@@ -310,6 +375,44 @@ func (m *Message) writeData(prefix string, p []byte) (int, error) {
 			m.pendingCR = true
 		}
 		p = p[i+1:]
+	}
+	return consumed, nil
+}
+
+// writeDataString is writeData over a string. The two are kept separate, the
+// way the stdlib splits bytes and strings, because converting between them is
+// the copy this path exists to avoid: slicing a string is free, and
+// bytes.Buffer.WriteString appends without an intermediate []byte.
+func (m *Message) writeDataString(prefix, s string) (int, error) {
+	if m.data == nil {
+		m.data = bytes.NewBuffer(nil)
+	}
+	if m.dataPrefix != prefix {
+		m.endDataLine()
+		m.dataPrefix = prefix
+	}
+	consumed := len(s)
+	for len(s) > 0 {
+		if m.pendingCR {
+			m.pendingCR = false
+			if s[0] == '\n' {
+				s = s[1:]
+				continue
+			}
+		}
+		i := strings.IndexAny(s, "\r\n")
+		if i < 0 {
+			m.startDataLine()
+			m.data.WriteString(s)
+			break
+		}
+		m.startDataLine()
+		m.data.WriteString(s[:i])
+		m.data.WriteByte('\n')
+		if s[i] == '\r' {
+			m.pendingCR = true
+		}
+		s = s[i+1:]
 	}
 	return consumed, nil
 }
