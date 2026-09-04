@@ -213,8 +213,12 @@ func NewMessage(opts ...MessageOption) *Message {
 }
 
 // Write appends p to the message data, implementing io.Writer. The data is
-// split into "data:" lines when the message is sent, so a newline in p
+// split into "data:" lines when the message is sent, so a line break in p
 // starts a new data line.
+//
+// LF, CRLF, and a bare CR all count as line breaks and are normalized to LF,
+// matching how the SSE format treats them. A CRLF split across two writes
+// counts as one break.
 func (m *Message) Write(p []byte) (int, error) {
 	return m.writeData("", p)
 }
@@ -236,6 +240,9 @@ func (m *Message) Write(p []byte) (int, error) {
 // data line. Writers stay usable after a later call: writing to an earlier
 // one terminates the current line and resumes that writer's prefix. A writer
 // that is never written to contributes nothing.
+//
+// Within a value, line breaks are recognized as in [Message.Write], and each
+// resulting line carries the prefix.
 //
 // The prefix is written verbatim, so include any separator the format wants
 // ("elements ", not "elements"). A prefix containing CR or LF is rejected:
