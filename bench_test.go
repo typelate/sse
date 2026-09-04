@@ -128,22 +128,22 @@ func BenchmarkMessage_parallel(b *testing.B) {
 	})
 }
 
-// BenchmarkSend_prefixed measures a keyed multi-line payload in the shape
+// BenchmarkSend_prefixWriter measures a keyed multi-line payload in the shape
 // Datastar uses: three values, the last spanning three lines.
-func BenchmarkSend_prefixed(b *testing.B) {
+func BenchmarkSend_prefixWriter(b *testing.B) {
 	r := newBenchResponse(b)
 	elements := []byte("<div>\n  hello\n</div>")
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
 		m := sse.NewMessage(sse.WithEvent("datastar-patch-elements"))
-		if _, err := io.WriteString(m.Prefix("selector "), "#foo"); err != nil {
+		if _, err := io.WriteString(m.PrefixWriter("selector "), "#foo"); err != nil {
 			b.Fatal(err)
 		}
-		if _, err := io.WriteString(m.Prefix("mode "), "inner"); err != nil {
+		if _, err := io.WriteString(m.PrefixWriter("mode "), "inner"); err != nil {
 			b.Fatal(err)
 		}
-		if _, err := m.Prefix("elements ").Write(elements); err != nil {
+		if _, err := m.PrefixWriter("elements ").Write(elements); err != nil {
 			b.Fatal(err)
 		}
 		if err := r.Send(m); err != nil {
@@ -152,18 +152,18 @@ func BenchmarkSend_prefixed(b *testing.B) {
 	}
 }
 
-// BenchmarkSend_stringPrefix is BenchmarkSend_prefixed with the two scalar
-// keys written by StringPrefix instead of through an io.Writer.
-func BenchmarkSend_stringPrefix(b *testing.B) {
+// BenchmarkSend_prefixString is BenchmarkSend_prefixWriter with the two
+// scalar keys written by PrefixString instead of through an io.Writer.
+func BenchmarkSend_prefixString(b *testing.B) {
 	r := newBenchResponse(b)
 	elements := []byte("<div>\n  hello\n</div>")
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
 		m := sse.NewMessage(sse.WithEvent("datastar-patch-elements"))
-		m.StringPrefix("selector ", "#foo")
-		m.StringPrefix("mode ", "inner")
-		if _, err := m.Prefix("elements ").Write(elements); err != nil {
+		m.PrefixString("selector ", "#foo")
+		m.PrefixString("mode ", "inner")
+		if _, err := m.PrefixWriter("elements ").Write(elements); err != nil {
 			b.Fatal(err)
 		}
 		if err := r.Send(m); err != nil {

@@ -417,7 +417,7 @@ func TestMessage_Write_reportsBytesConsumed(t *testing.T) {
 	}
 }
 
-func TestMessage_Prefix(t *testing.T) {
+func TestMessage_PrefixWriter(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		opts  []sse.MessageOption
@@ -425,40 +425,42 @@ func TestMessage_Prefix(t *testing.T) {
 		want  string
 	}{
 		{
-			name:  "prefix repeats on every line of the value",
-			write: func(t *testing.T, m *sse.Message) { mustWriteString(t, m.Prefix("elements "), "<div>\n  hi\n</div>") },
-			want:  "data: elements <div>\ndata: elements   hi\ndata: elements </div>\n\n",
+			name: "prefix repeats on every line of the value",
+			write: func(t *testing.T, m *sse.Message) {
+				mustWriteString(t, m.PrefixWriter("elements "), "<div>\n  hi\n</div>")
+			},
+			want: "data: elements <div>\ndata: elements   hi\ndata: elements </div>\n\n",
 		},
 		{
 			name: "each prefix gets its own data line",
 			opts: []sse.MessageOption{sse.WithEvent("datastar-patch-elements")},
 			write: func(t *testing.T, m *sse.Message) {
-				mustWriteString(t, m.Prefix("selector "), "#foo")
-				mustWriteString(t, m.Prefix("mode "), "inner")
-				mustWriteString(t, m.Prefix("elements "), "<div>hi</div>")
+				mustWriteString(t, m.PrefixWriter("selector "), "#foo")
+				mustWriteString(t, m.PrefixWriter("mode "), "inner")
+				mustWriteString(t, m.PrefixWriter("elements "), "<div>hi</div>")
 			},
 			want: "event: datastar-patch-elements\ndata: selector #foo\ndata: mode inner\ndata: elements <div>hi</div>\n\n",
 		},
 		{
 			name: "a new writer terminates the partial line left by the previous one",
 			write: func(t *testing.T, m *sse.Message) {
-				mustWriteString(t, m.Prefix("a "), "x")
-				mustWriteString(t, m.Prefix("b "), "y")
+				mustWriteString(t, m.PrefixWriter("a "), "x")
+				mustWriteString(t, m.PrefixWriter("b "), "y")
 			},
 			want: "data: a x\ndata: b y\n\n",
 		},
 		{
 			name: "a writer that is never written to contributes nothing",
 			write: func(t *testing.T, m *sse.Message) {
-				m.Prefix("unused ")
-				mustWriteString(t, m.Prefix("b "), "y")
+				m.PrefixWriter("unused ")
+				mustWriteString(t, m.PrefixWriter("b "), "y")
 			},
 			want: "data: b y\n\n",
 		},
 		{
 			name: "writing to an earlier writer again resumes its prefix on a new line",
 			write: func(t *testing.T, m *sse.Message) {
-				first, second := m.Prefix("a "), m.Prefix("b ")
+				first, second := m.PrefixWriter("a "), m.PrefixWriter("b ")
 				mustWriteString(t, first, "x")
 				mustWriteString(t, second, "y")
 				mustWriteString(t, first, "z")
@@ -467,13 +469,13 @@ func TestMessage_Prefix(t *testing.T) {
 		},
 		{
 			name:  "an empty line still carries the prefix",
-			write: func(t *testing.T, m *sse.Message) { mustWriteString(t, m.Prefix("e "), "a\n\nb") },
+			write: func(t *testing.T, m *sse.Message) { mustWriteString(t, m.PrefixWriter("e "), "a\n\nb") },
 			want:  "data: e a\ndata: e \ndata: e b\n\n",
 		},
 		{
 			name: "successive writes to one writer continue the same line",
 			write: func(t *testing.T, m *sse.Message) {
-				w := m.Prefix("e ")
+				w := m.PrefixWriter("e ")
 				mustWriteString(t, w, "he")
 				mustWriteString(t, w, "llo")
 			},
@@ -482,14 +484,14 @@ func TestMessage_Prefix(t *testing.T) {
 		{
 			name: "an unprefixed write after a prefixed one starts a new line",
 			write: func(t *testing.T, m *sse.Message) {
-				mustWriteString(t, m.Prefix("a "), "x")
+				mustWriteString(t, m.PrefixWriter("a "), "x")
 				mustWriteString(t, m, "y")
 			},
 			want: "data: a x\ndata: y\n\n",
 		},
 		{
 			name:  "an empty prefix behaves like a plain write",
-			write: func(t *testing.T, m *sse.Message) { mustWriteString(t, m.Prefix(""), "a\nb") },
+			write: func(t *testing.T, m *sse.Message) { mustWriteString(t, m.PrefixWriter(""), "a\nb") },
 			want:  "data: a\ndata: b\n\n",
 		},
 	} {
@@ -518,7 +520,7 @@ func TestMessage_Prefix(t *testing.T) {
 // recognise CR line breaks itself. Left to WriteTo's normalization they would
 // split a line open after the prefixes were already inlined, emitting a bare
 // "data:" line in the middle of a value.
-func TestMessage_Prefix_carriageReturns(t *testing.T) {
+func TestMessage_PrefixWriter_carriageReturns(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		write func(t *testing.T, w io.Writer)
@@ -570,7 +572,7 @@ func TestMessage_Prefix_carriageReturns(t *testing.T) {
 			}
 
 			m := sse.NewMessage()
-			tc.write(t, m.Prefix("e "))
+			tc.write(t, m.PrefixWriter("e "))
 			if err := r.Send(m); err != nil {
 				t.Fatalf("Send: %v", err)
 			}
@@ -582,13 +584,13 @@ func TestMessage_Prefix_carriageReturns(t *testing.T) {
 	}
 }
 
-func TestMessage_Prefix_invalid(t *testing.T) {
+func TestMessage_PrefixWriter_invalid(t *testing.T) {
 	for _, prefix := range []string{"a\nb", "a\rb", "\n", "\r"} {
 		t.Run(strconv.Quote(prefix), func(t *testing.T) {
 			m := sse.NewMessage()
-			mustWriteString(t, m.Prefix("ok "), "kept")
+			mustWriteString(t, m.PrefixWriter("ok "), "kept")
 
-			n, err := m.Prefix(prefix).Write([]byte("dropped"))
+			n, err := m.PrefixWriter(prefix).Write([]byte("dropped"))
 			if !errors.Is(err, sse.ErrInvalidField) {
 				t.Errorf("Prefix(%q).Write() error = %v, want errors.Is(_, ErrInvalidField)", prefix, err)
 			}
@@ -596,7 +598,7 @@ func TestMessage_Prefix_invalid(t *testing.T) {
 				t.Errorf("Prefix(%q).Write() = %d, want 0", prefix, n)
 			}
 
-			n, err = m.Prefix(prefix).(io.StringWriter).WriteString("dropped")
+			n, err = m.PrefixWriter(prefix).(io.StringWriter).WriteString("dropped")
 			if !errors.Is(err, sse.ErrInvalidField) {
 				t.Errorf("Prefix(%q).WriteString() error = %v, want errors.Is(_, ErrInvalidField)", prefix, err)
 			}
@@ -610,7 +612,7 @@ func TestMessage_Prefix_invalid(t *testing.T) {
 	}
 }
 
-func TestMessage_StringPrefix(t *testing.T) {
+func TestMessage_PrefixString(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		opts  []sse.MessageOption
@@ -619,47 +621,47 @@ func TestMessage_StringPrefix(t *testing.T) {
 	}{
 		{
 			name:  "writes a keyed data line",
-			write: func(t *testing.T, m *sse.Message) { m.StringPrefix("mode ", "inner") },
+			write: func(t *testing.T, m *sse.Message) { m.PrefixString("mode ", "inner") },
 			want:  "data: mode inner\n\n",
 		},
 		{
 			name: "each call is its own data line",
 			opts: []sse.MessageOption{sse.WithEvent("datastar-patch-elements")},
 			write: func(t *testing.T, m *sse.Message) {
-				m.StringPrefix("selector ", "#foo")
-				m.StringPrefix("mode ", "inner")
+				m.PrefixString("selector ", "#foo")
+				m.PrefixString("mode ", "inner")
 			},
 			want: "event: datastar-patch-elements\ndata: selector #foo\ndata: mode inner\n\n",
 		},
 		{
 			name:  "a multi-line value repeats the prefix",
-			write: func(t *testing.T, m *sse.Message) { m.StringPrefix("e ", "<div>\n  hi\n</div>") },
+			write: func(t *testing.T, m *sse.Message) { m.PrefixString("e ", "<div>\n  hi\n</div>") },
 			want:  "data: e <div>\ndata: e   hi\ndata: e </div>\n\n",
 		},
 		{
 			name:  "CRLF and bare CR are line breaks",
-			write: func(t *testing.T, m *sse.Message) { m.StringPrefix("e ", "a\r\nb\rc") },
+			write: func(t *testing.T, m *sse.Message) { m.PrefixString("e ", "a\r\nb\rc") },
 			want:  "data: e a\ndata: e b\ndata: e c\n\n",
 		},
 		{
 			name:  "an empty value still writes its line",
-			write: func(t *testing.T, m *sse.Message) { m.StringPrefix("onlyIfMissing ", "") },
+			write: func(t *testing.T, m *sse.Message) { m.PrefixString("onlyIfMissing ", "") },
 			want:  "data: onlyIfMissing \n\n",
 		},
 		{
 			name: "it terminates a line left open by a Prefix writer",
 			write: func(t *testing.T, m *sse.Message) {
-				mustWriteString(t, m.Prefix("a "), "x")
-				m.StringPrefix("b ", "y")
+				mustWriteString(t, m.PrefixWriter("a "), "x")
+				m.PrefixString("b ", "y")
 			},
 			want: "data: a x\ndata: b y\n\n",
 		},
 		{
 			name: "a Prefix writer resumes after it",
 			write: func(t *testing.T, m *sse.Message) {
-				w := m.Prefix("a ")
+				w := m.PrefixWriter("a ")
 				mustWriteString(t, w, "x")
-				m.StringPrefix("b ", "y")
+				m.PrefixString("b ", "y")
 				mustWriteString(t, w, "z")
 			},
 			want: "data: a x\ndata: b y\ndata: a z\n\n",
@@ -686,16 +688,16 @@ func TestMessage_StringPrefix(t *testing.T) {
 	}
 }
 
-// StringPrefix has no error to return, so an unusable prefix has to surface
+// PrefixString has no error to return, so an unusable prefix has to surface
 // at Send, the way an invalid id or event already does.
-func TestMessage_StringPrefix_invalidPrefixReportedBySend(t *testing.T) {
+func TestMessage_PrefixString_invalidPrefixReportedBySend(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	r, _ := sse.New(rec, req, http.StatusOK)
 
 	m := sse.NewMessage()
-	m.StringPrefix("ok ", "kept")
-	m.StringPrefix("bad\n", "dropped")
+	m.PrefixString("ok ", "kept")
+	m.PrefixString("bad\n", "dropped")
 
 	if err := r.Send(m); !errors.Is(err, sse.ErrInvalidField) {
 		t.Errorf("Send() error = %v, want errors.Is(_, ErrInvalidField)", err)
@@ -708,38 +710,38 @@ func TestMessage_StringPrefix_invalidPrefixReportedBySend(t *testing.T) {
 // A rejected Prefix writer records the failure too, so both paths report an
 // unusable prefix the same way rather than one failing loudly and the other
 // only when its Write error is checked.
-func TestMessage_Prefix_invalidPrefixReportedBySend(t *testing.T) {
+func TestMessage_PrefixWriter_invalidPrefixReportedBySend(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	r, _ := sse.New(rec, req, http.StatusOK)
 
 	m := sse.NewMessage()
-	mustWriteString(t, m.Prefix("ok "), "kept")
-	_, _ = m.Prefix("bad\n").Write([]byte("dropped"))
+	mustWriteString(t, m.PrefixWriter("ok "), "kept")
+	_, _ = m.PrefixWriter("bad\n").Write([]byte("dropped"))
 
 	if err := r.Send(m); !errors.Is(err, sse.ErrInvalidField) {
 		t.Errorf("Send() error = %v, want errors.Is(_, ErrInvalidField)", err)
 	}
 }
 
-// The point of StringPrefix is to avoid the two allocations the io.Writer
+// The point of PrefixString is to avoid the two allocations the io.Writer
 // form costs: boxing dataWriter into an interface, and io.WriteString copying
 // the string because dataWriter had no WriteString method.
-func TestMessage_StringPrefix_doesNotAllocate(t *testing.T) {
+func TestMessage_PrefixString_doesNotAllocate(t *testing.T) {
 	m := sse.NewMessage()
-	m.StringPrefix("grow ", strings.Repeat("x", 64*1024)) // pre-grow the buffer
+	m.PrefixString("grow ", strings.Repeat("x", 64*1024)) // pre-grow the buffer
 
 	if got := testing.AllocsPerRun(100, func() {
-		m.StringPrefix("mode ", "inner")
+		m.PrefixString("mode ", "inner")
 	}); got != 0 {
-		t.Errorf("StringPrefix allocated %v times per call, want 0", got)
+		t.Errorf("PrefixString allocated %v times per call, want 0", got)
 	}
 }
 
-func TestMessage_Prefix_writerImplementsStringWriter(t *testing.T) {
+func TestMessage_PrefixWriter_implementsStringWriter(t *testing.T) {
 	m := sse.NewMessage()
 
-	w := m.Prefix("e ")
+	w := m.PrefixWriter("e ")
 	sw, ok := w.(io.StringWriter)
 	if !ok {
 		t.Fatalf("Prefix returned %T, which does not implement io.StringWriter; io.WriteString would copy the string into a []byte", w)
@@ -752,11 +754,11 @@ func TestMessage_Prefix_writerImplementsStringWriter(t *testing.T) {
 	}
 }
 
-func TestMessage_Prefix_reportsBytesConsumed(t *testing.T) {
+func TestMessage_PrefixWriter_reportsBytesConsumed(t *testing.T) {
 	m := sse.NewMessage()
 	data := []byte("a\nb")
 
-	n, err := m.Prefix("e ").Write(data)
+	n, err := m.PrefixWriter("e ").Write(data)
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
